@@ -189,7 +189,6 @@ class SiglipEncoder(nn.Module):
             [SiglipEncoderLayer(config) for _ in range(config.num_hidden_layers)]
         )
 
-    # Ignore copy
     def forward(
         self,
         inputs_embeds: torch.Tensor
@@ -205,7 +204,7 @@ class SiglipEncoder(nn.Module):
 
 
 class SiglipVisionTransformer(nn.Module):
-    def __init__(self, config: SiglipVisionConfig):
+    def __init__(self, config):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
@@ -213,16 +212,66 @@ class SiglipVisionTransformer(nn.Module):
         self.embeddings = SiglipVisionEmbeddings(config)
         self.encoder = SiglipEncoder(config)
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+    
+    def random_masking(self, x: torch.Tensor, mask_ratio: float=0.75) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Apply random masking to the input embeddings.
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape [batch_size, sequence_length, embed_dim]
+            mask_ratio (float): The proportion of tokens to mask.
+        
+        Returns:
+            x_masked (torch.Tensor): Masked tensor.
+            mask (torch.Tensor): Binary mask showing which tokens were masked (1) or kept (0).
+            ids_restore (torch.Tensor): Indices to restore the original order of tokens.
+        """
+        N, L, D = x.shape  # batch, length, dimension
+        len_keep = int(L * (1 - mask_ratio))
 
-    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        # Generate random noise and shuffle tokens
+        noise = torch.rand(N, L)
+        ids_shuffle = torch.argsort(noise, dim=1)  # Shuffle by sorting noise
+        ids_restore = torch.argsort(ids_shuffle, dim=1)  # Indices to restore original order
+
+        # Keep only a subset of tokens
+        ids_keep = ids_shuffle[:, :len_keep]  # Indices of tokens to keep
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).expand(-1, -1, D))  # Gather kept tokens
+
+        # Create binary mask (0 for kept, 1 for removed)
+        mask = torch.ones([N, L])  # Start with all 1s (all removed)
+        mask[:, :len_keep] = 0  # Mark kept tokens as 0
+        mask = torch.gather(mask, dim=1, index=ids_restore)  # Restore original order of the mask
+
+        # return masked embeddings, binary mask and indices to restore the original order
+        return x_masked, mask, ids_restore
+
+    def forward(self, pixel_values: torch.Tensor, mask_ratio: float = 0.75) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Forward pass of the vision transformer.
+        
+        Args:
+            pixel_values (torch.Tensor): Input image tensor of shape [Batch_Size, Channels, Height, Width].
+            mask_ratio (float): Proportion of tokens to mask (default: 0.15).
+        
+        Returns:
+            torch.Tensor: Final output after encoding and layer normalization.
+        """
         # pixel_values: [Batch_Size, Channels, Height, Width] -> [Batch_Size, Num_Patches, Embed_Dim]
         hidden_states = self.embeddings(pixel_values)
 
-        last_hidden_state = self.encoder(inputs_embeds=hidden_states)
+        # Apply random masking to the embeddings
+        masked_hidden_states, mask, ids_restore = self.random_masking(hidden_states, mask_ratio)
 
+        # Pass the masked embeddings to the encoder
+        last_hidden_state = self.encoder(inputs_embeds=masked_hidden_states)
+
+        # Apply layer normalization
         last_hidden_state = self.post_layernorm(last_hidden_state)
 
-        return last_hidden_state
+        # Return the output and the binary mask, and the indices to restore the original order
+        return last_hidden_state, mask, ids_restore
+
 
 
 class SiglipVisionModel(nn.Module):
