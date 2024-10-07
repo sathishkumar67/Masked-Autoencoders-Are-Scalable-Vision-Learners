@@ -1,13 +1,12 @@
 from __future__ import annotations
 import torch
 from torch import nn
-import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
 
 @dataclass
-class SiglipVisionConfig:
+class VisionEncoderConfig:
     image_size: int
     hidden_size: int
     intermediate_size: int
@@ -22,8 +21,8 @@ class SiglipVisionConfig:
     mask_ratio: float = 0.75
 
 
-class SiglipVisionEmbeddings(nn.Module):
-    def __init__(self, config: SiglipVisionConfig):
+class VisionEncoderEmbeddings(nn.Module):
+    def __init__(self, config: VisionEncoderConfig):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -65,7 +64,7 @@ class SiglipVisionEmbeddings(nn.Module):
         return embeddings
 
 
-class SiglipAttention(nn.Module):
+class Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(self, config):
@@ -132,7 +131,7 @@ class SiglipAttention(nn.Module):
         return attn_output, attn_weights
 
 
-class SiglipMLP(nn.Module):
+class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -150,13 +149,13 @@ class SiglipMLP(nn.Module):
         return hidden_states
 
 
-class SiglipEncoderLayer(nn.Module):
-    def __init__(self, config: SiglipVisionConfig):
+class VisionEncoderLayer(nn.Module):
+    def __init__(self, config: VisionEncoderConfig):
         super().__init__()
         self.embed_dim = config.hidden_size
-        self.self_attn = SiglipAttention(config)
+        self.self_attn = Attention(config)
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
-        self.mlp = SiglipMLP(config)
+        self.mlp = MLP(config)
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
     # Ignore copy
@@ -184,12 +183,12 @@ class SiglipEncoderLayer(nn.Module):
         return hidden_states
 
 
-class SiglipEncoder(nn.Module):
-    def __init__(self, config: SiglipVisionConfig):
+class VisionEncoder(nn.Module):
+    def __init__(self, config: VisionEncoderConfig):
         super().__init__()
         self.config = config
         self.layers = nn.ModuleList(
-            [SiglipEncoderLayer(config) for _ in range(config.num_hidden_layers)]
+            [VisionEncoderLayer(config) for _ in range(config.num_hidden_layers)]
         )
 
     def forward(
@@ -206,15 +205,15 @@ class SiglipEncoder(nn.Module):
         return hidden_states
 
 
-class SiglipVisionTransformer(nn.Module):
+class VisionTransformer(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
         self.mask_ratio = config.mask_ratio
 
-        self.embeddings = SiglipVisionEmbeddings(config)
-        self.encoder = SiglipEncoder(config)
+        self.embeddings = VisionEncoderEmbeddings(config)
+        self.encoder = VisionEncoder(config)
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
     
     def random_masking(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -279,12 +278,12 @@ class SiglipVisionTransformer(nn.Module):
 
 
 
-class SiglipVisionModel(nn.Module):
+class VisionModel(nn.Module):
 
-    def __init__(self, config: SiglipVisionConfig):
+    def __init__(self, config: VisionEncoderConfig):
         super().__init__()
         self.config = config
-        self.vision_model = SiglipVisionTransformer(config)
+        self.vision_model = VisionTransformer(config)
 
     def forward(self, pixel_values) -> Tuple:
         # [Batch_Size, Channels, Height, Width] -> [Batch_Size, Num_Patches, Embed_Dim]
