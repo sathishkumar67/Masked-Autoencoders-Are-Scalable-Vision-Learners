@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 @dataclass
 class VisionDecoderConfig:
     image_size: int
+    in_proj_dim: int # Input projection dimension
     hidden_size: int
     intermediate_size: int
     num_hidden_layers: int
@@ -163,15 +164,25 @@ class VisionDecoder(nn.Module):
 class VisionTransformer(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.config = config
+
         embed_dim = config.hidden_size
-        self.mask_ratio = config.mask_ratio
+        in_proj_dim = config.in_proj_dim
+
+        self.config = config
         self.image_size = config.image_size
         self.patch_size = config.patch_size
         self.num_patches = (self.image_size // self.patch_size) ** 2
         self.num_positions = self.num_patches
 
-        self.projector = nn.Linear(embed_dim, embed_dim, bias=True)
+        # check if the input projection dimension is equal to the embedding dimension
+        # if not, add a linear layer to project the input to the embedding dimension
+        # else, use the identity layer
+        if in_proj_dim != embed_dim:
+            self.projector = nn.Linear(in_proj_dim, embed_dim, bias=True)
+        else:
+            print("same dimension size") 
+            self.projector = nn.Identity()
+        
         self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.position_embedding = nn.Embedding(self.num_positions, embed_dim)
         self.register_buffer(
@@ -185,46 +196,66 @@ class VisionTransformer(nn.Module):
         self.to_patch = nn.Linear(embed_dim, self.patch_size**2 * config.num_channels, bias=True)
 
     
-    def reconstruct_sequence(self, x: torch.Tensor, ids_restore: torch.Tensor) -> torch.Tensor:
-
-
-    def forward(self, pixel_values: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def reconstruct_sequence(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> torch.Tensor:
         """
-        Forward pass of the vision transformer.
+        Reconstruct the original sequence from the masked sequence.
         
         Args:
-            pixel_values (torch.Tensor): Input image tensor of shape [Batch_Size, Channels, Height, Width].
+            x (Tuple[torch.Tensor, torch.Tensor, torch.Tensor]): Tuple containing the output tensor, the binary mask, and the indices to restore the original order.
 
         Returns:
-            torch.Tensor: Final output after encoding and layer normalization.
+            torch.Tensor: Reconstructed sequence.
         """
-        # pixel_values: [Batch_Size, Channels, Height, Width] -> [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = self.embeddings(pixel_values)
-        if self.config.do_random_mask:
-            # Apply random masking to the embeddings
-            masked_hidden_states, mask, ids_restore = self.random_masking(hidden_states)
-        else:
-            masked_hidden_states = hidden_states
-            mask, ids_restore = None, None
+        # Unpack the tuple
+        encoded_tokens, mask, ids_restore = x
+
+        # append the mask token to the encoded tokens
+        num_mask_tokens = ids_restore.shape[0] - encoded_tokens.shape[0] # calculate the number of mask tokens to be needed
+        mask_tokens = self.mask_token.repeat(encoded_tokens.shape[0], num_mask_tokens, 1) # repeat the mask token for the batch
+        encoded_tokens_masked = torch.cat([encoded_tokens, mask_tokens], dim=1) # concatenate the mask tokens to the encoded tokens
+
+        # unshuflle the tokens to the original order
+        encoded_tokens_masked = torch.gather(encoded_tokens_masked, 1, index=ids_restore.unsqueeze(-1).repeat(1, 1, encoded_tokens_masked.shape[2]))
+
+        # add the position embeddings
+        encoded_tokens_masked = encoded_tokens_masked + self.position_embedding(self.position_ids)
+
+        return encoded_tokens_masked
+
+
+    def forward(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
+        """
+        Forward pass of the Vision Transformer.
+        Args:
+        x (Tuple[torch.Tensor, torch.Tensor, torch.Tensor]): Tuple containing the encoded representation, the binary mask, and the indices to restore the original order.
+
+        Returns:
+            torch.Tensor: decoded sequence.
+        """
+
+        # Reconstruct the original sequence
+        x = self.reconstruct_sequence(x)
+
+        # pass the reconstructed sequence through the decoder
+        x = self.decoder(x)
+
+        # apply layer normalization
+        x = self.post_layernorm(x)
+
+        # project the output to the original image size
+        x = self.to_patch(x)
             
-        # Pass the masked embeddings to the encoder
-        last_hidden_state = self.encoder(inputs_embeds=masked_hidden_states)
-
-        # Apply layer normalization
-        last_hidden_state = self.post_layernorm(last_hidden_state)
-
-        # Return the output and the binary mask, and the indices to restore the original order
-        return last_hidden_state, mask, ids_restore
-
+        # return the output
+        return x
 
 
 class VisionModel(nn.Module):
 
-    def __init__(self, config: VisionEncoderConfig):
+    def __init__(self, config: VisionDecoderConfig):
         super().__init__()
         self.config = config
         self.vision_model = VisionTransformer(config)
 
-    def forward(self, pixel_values) -> Tuple:
+    def forward(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple:
         # [Batch_Size, Channels, Height, Width] -> [Batch_Size, Num_Patches, Embed_Dim]
-        return self.vision_model(pixel_values=pixel_values) 
+        return self.vision_model(x) 
