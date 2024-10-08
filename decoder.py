@@ -210,15 +210,13 @@ class Decoder(nn.Module):
         encoded_tokens, mask, ids_restore = x
 
         # append the mask token to the encoded tokens
-        num_mask_tokens = ids_restore.shape[0] - encoded_tokens.shape[0] # calculate the number of mask tokens to be needed
+        num_mask_tokens = ids_restore.shape[1] - encoded_tokens.shape[1] # calculate the number of mask tokens to be needed
+
         mask_tokens = self.mask_token.repeat(encoded_tokens.shape[0], num_mask_tokens, 1) # repeat the mask token for the batch
         encoded_tokens_masked = torch.cat([encoded_tokens, mask_tokens], dim=1) # concatenate the mask tokens to the encoded tokens
 
         # unshuflle the tokens to the original order
-        encoded_tokens_masked = torch.gather(encoded_tokens_masked, 1, index=ids_restore.unsqueeze(-1).repeat(1, 1, encoded_tokens_masked.shape[2]))
-
-        # add the position embeddings
-        encoded_tokens_masked = encoded_tokens_masked + self.position_embedding(self.position_ids)
+        encoded_tokens_masked = torch.gather(encoded_tokens_masked, 1, index=ids_restore.unsqueeze(-1).repeat(1, 1, encoded_tokens.shape[2]))
 
         return encoded_tokens_masked
 
