@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 
 
 @dataclass
-class VisionDecoderConfig:
+class DecoderConfig:
     image_size: int
     in_proj_dim: int # Input projection dimension
     hidden_size: int
@@ -20,7 +20,7 @@ class VisionDecoderConfig:
     num_image_tokens: int = None
 
 
-class Attention(nn.Module):
+class DecoderAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(self, config):
@@ -87,7 +87,7 @@ class Attention(nn.Module):
         return attn_output, attn_weights
 
 
-class MLP(nn.Module):
+class DecoderMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -105,13 +105,13 @@ class MLP(nn.Module):
         return hidden_states
 
 
-class VisionDecoderLayer(nn.Module):
-    def __init__(self, config: VisionDecoderConfig):
+class DecoderLayer(nn.Module):
+    def __init__(self, config: DecoderConfig):
         super().__init__()
         self.embed_dim = config.hidden_size
-        self.self_attn = Attention(config)
+        self.self_attn = DecoderAttention(config)
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
-        self.mlp = MLP(config)
+        self.mlp = DecoderMLP(config)
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
     # Ignore copy
@@ -139,12 +139,12 @@ class VisionDecoderLayer(nn.Module):
         return hidden_states
 
 
-class VisionDecoder(nn.Module):
-    def __init__(self, config: VisionDecoderConfig):
+class DecoderBlock(nn.Module):
+    def __init__(self, config: DecoderConfig):
         super().__init__()
         self.config = config
         self.layers = nn.ModuleList(
-            [VisionDecoderLayer(config) for _ in range(config.num_hidden_layers)]
+            [DecoderLayer(config) for _ in range(config.num_hidden_layers)]
         )
 
     def forward(
@@ -161,7 +161,7 @@ class VisionDecoder(nn.Module):
         return hidden_states
 
 
-class VisionTransformer(nn.Module):
+class Decoder(nn.Module):
     def __init__(self, config):
         super().__init__()
 
@@ -191,7 +191,7 @@ class VisionTransformer(nn.Module):
             persistent=False,
         )
 
-        self.decoder = VisionDecoder(config)
+        self.decoder = DecoderBlock(config)
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
         self.to_patch = nn.Linear(embed_dim, self.patch_size**2 * config.num_channels, bias=True)
 
@@ -249,12 +249,12 @@ class VisionTransformer(nn.Module):
         return x
 
 
-class VisionModel(nn.Module):
+class DecoderModel(nn.Module):
 
-    def __init__(self, config: VisionDecoderConfig):
+    def __init__(self, config: DecoderConfig):
         super().__init__()
         self.config = config
-        self.vision_model = VisionTransformer(config)
+        self.vision_model = Decoder(config)
 
     def forward(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple:
         # [Batch_Size, Channels, Height, Width] -> [Batch_Size, Num_Patches, Embed_Dim]
