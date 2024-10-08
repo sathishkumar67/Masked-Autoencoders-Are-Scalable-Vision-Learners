@@ -1,0 +1,2 @@
+1. add rms normalization
+2. remove the attention block and replace it with the flashattention
