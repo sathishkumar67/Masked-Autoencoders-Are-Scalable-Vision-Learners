@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 
 
 @dataclass
-class VisionEncoderConfig:
+class EncoderConfig:
     image_size: int
     hidden_size: int
     intermediate_size: int
@@ -21,8 +21,8 @@ class VisionEncoderConfig:
     mask_ratio: float = 0.75
 
 
-class VisionEncoderEmbeddings(nn.Module):
-    def __init__(self, config: VisionEncoderConfig):
+class EncoderEmbeddings(nn.Module):
+    def __init__(self, config: EncoderConfig):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -64,7 +64,7 @@ class VisionEncoderEmbeddings(nn.Module):
         return embeddings
 
 
-class Attention(nn.Module):
+class EncoderAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(self, config):
@@ -131,7 +131,7 @@ class Attention(nn.Module):
         return attn_output, attn_weights
 
 
-class MLP(nn.Module):
+class EncoderMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -149,13 +149,13 @@ class MLP(nn.Module):
         return hidden_states
 
 
-class VisionEncoderLayer(nn.Module):
-    def __init__(self, config: VisionEncoderConfig):
+class EncoderLayer(nn.Module):
+    def __init__(self, config: EncoderConfig):
         super().__init__()
         self.embed_dim = config.hidden_size
-        self.self_attn = Attention(config)
+        self.self_attn = EncoderAttention(config)
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
-        self.mlp = MLP(config)
+        self.mlp = EncoderMLP(config)
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
     # Ignore copy
@@ -183,12 +183,12 @@ class VisionEncoderLayer(nn.Module):
         return hidden_states
 
 
-class VisionEncoder(nn.Module):
-    def __init__(self, config: VisionEncoderConfig):
+class EncoderBlock(nn.Module):
+    def __init__(self, config: EncoderConfig):
         super().__init__()
         self.config = config
         self.layers = nn.ModuleList(
-            [VisionEncoderLayer(config) for _ in range(config.num_hidden_layers)]
+            [EncoderLayer(config) for _ in range(config.num_hidden_layers)]
         )
 
     def forward(
@@ -205,15 +205,15 @@ class VisionEncoder(nn.Module):
         return hidden_states
 
 
-class VisionTransformer(nn.Module):
+class Encoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
         self.mask_ratio = config.mask_ratio
 
-        self.embeddings = VisionEncoderEmbeddings(config)
-        self.encoder = VisionEncoder(config)
+        self.embeddings = EncoderEmbeddings(config)
+        self.encoder = EncoderBlock(config)
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
     
     def random_masking(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -278,12 +278,12 @@ class VisionTransformer(nn.Module):
 
 
 
-class VisionModel(nn.Module):
+class EncoderModel(nn.Module):
 
-    def __init__(self, config: VisionEncoderConfig):
+    def __init__(self, config: EncoderConfig):
         super().__init__()
         self.config = config
-        self.vision_model = VisionTransformer(config)
+        self.vision_model = Encoder(config)
 
     def forward(self, pixel_values) -> Tuple:
         # [Batch_Size, Channels, Height, Width] -> [Batch_Size, Num_Patches, Embed_Dim]
