@@ -1,2 +1,4 @@
+finished with the encoder and decoder structure, yet to optimize for memory and compute efficiency
+
 1. add rms normalization
 2. remove the attention block and replace it with the flashattention
