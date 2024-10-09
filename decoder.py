@@ -177,8 +177,12 @@ class Decoder(nn.Module):
         # check if the input projection dimension is equal to the embedding dimension
         # if not, add a linear layer to project the input to the embedding dimension
         # else, use the identity layer
-        self.projector = nn.Linear(in_proj_dim, embed_dim, bias=True)
-        self.projector_norm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+        if in_proj_dim != embed_dim:
+            self.projector = nn.Linear(in_proj_dim, embed_dim, bias=True)
+            self.projector_norm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+        else:
+            self.projector = nn.Identity()
+            self.projector_norm = nn.Identity()
 
         self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.position_embedding = nn.Embedding(self.num_positions, embed_dim)
@@ -206,10 +210,10 @@ class Decoder(nn.Module):
         # Unpack the tuple
         encoded_tokens, mask, ids_restore = x
 
-        residual = encoded_tokens
+        # project the encoded tokens
         encoded_tokens = self.projector(encoded_tokens)
+        # normalize the encoded tokens
         encoded_tokens = self.projector_norm(encoded_tokens)
-        encoded_tokens = residual + encoded_tokens
 
         # append the mask token to the encoded tokens
         num_mask_tokens = ids_restore.shape[1] - encoded_tokens.shape[1] # calculate the number of mask tokens to be needed
