@@ -202,7 +202,7 @@ class Decoder(nn.Module):
             out_channels=out_channels,
             kernel_size=self.patch_size,
             stride=self.patch_size,
-            padding="valid", # This indicates no padding is added
+            padding=0, # This indicates no padding is added
         )
 
     
