@@ -170,10 +170,13 @@ class Decoder(nn.Module):
         out_channels = config.num_channels
 
         self.config = config
+        self.hidden_size = config.hidden_size
         self.image_size = config.image_size
         self.patch_size = config.patch_size
         self.num_patches = (self.image_size // self.patch_size) ** 2
         self.num_positions = self.num_patches
+        self.height = self.image_size // self.patch_size
+        self.width = self.image_size // self.patch_size
 
         # check if the input projection dimension is equal to the embedding dimension
         # if not, add a linear layer to project the input to the embedding dimension
@@ -253,6 +256,9 @@ class Decoder(nn.Module):
 
         # apply layer normalization
         x = self.post_layernorm(x)
+
+        # reshape the output to the appropriate shape
+        x = x.view(-1, self.hidden_size, self.height, self.width)
 
         # project the output to the original image size
         x = self.reverse_patch_embeddings(x)
