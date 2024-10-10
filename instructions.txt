@@ -1,4 +1,4 @@
 finished with the encoder and decoder structure, yet to optimize for memory and compute efficiency
 
 1. add rms normalization
-2. remove the attention block and replace it with the flashattention
+2. remove the attention block and replace it with the flashattention(Need to check the scale init and scale factor before passing into softmax)
