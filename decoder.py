@@ -199,14 +199,8 @@ class Decoder(nn.Module):
         self.decoder = DecoderBlock(config)
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
-        # reverse the patch embeddings to the original image size
-        self.reverse_patch_embeddings = nn.ConvTranspose2d(
-            in_channels=embed_dim,
-            out_channels=out_channels,
-            kernel_size=self.patch_size,
-            stride=self.patch_size,
-            padding=0, # This indicates no padding is added
-        )
+        # output prediction layer
+        self.predictor = nn.Linear(embed_dim, self.patch_size**2 * out_channels, bias=True)
 
     
     def reconstruct_sequence(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> torch.Tensor:
@@ -260,8 +254,8 @@ class Decoder(nn.Module):
         # reshape the output to the appropriate shape
         x = x.view(-1, self.hidden_size, self.height, self.width)
 
-        # project the output to the original image size
-        x = self.reverse_patch_embeddings(x)
+        # apply the prediction layer
+        x = self.predictor(x)
             
         # return the output
         return x
