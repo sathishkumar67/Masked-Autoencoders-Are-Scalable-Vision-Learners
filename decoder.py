@@ -251,9 +251,6 @@ class Decoder(nn.Module):
         # apply layer normalization
         x = self.post_layernorm(x)
 
-        # reshape the output to the appropriate shape
-        x = x.view(-1, self.hidden_size, self.height, self.width)
-
         # apply the prediction layer
         x = self.predictor(x)
             
