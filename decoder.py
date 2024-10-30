@@ -22,8 +22,6 @@ class DecoderConfig:
 
 
 class DecoderAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
-
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -167,10 +165,13 @@ class Decoder(nn.Module):
         self.decoder = DecoderBlock(config)
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
-        # output prediction layer
-        self.predictor = nn.Linear(embed_dim, self.patch_size**2 * out_channels, bias=True)
-
+        self.reverse_patch_embedding = nn.ConvTranspose2d(
+            in_channels=embed_dim,
+            out_channels=self.config.num_channels,
+            kernel_size=self.config.patch_size,
+            stride=self.config.patch_size)
     
+
     def reconstruct_sequence(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> torch.Tensor:
         """
         Reconstruct the original sequence from the masked sequence.
@@ -219,10 +220,12 @@ class Decoder(nn.Module):
         # apply layer normalization
         x = self.post_layernorm(x)
 
-        # apply the prediction layer
-        x = self.predictor(x)
-            
-        # return the output
+        # reshape the tensor
+        x = x.transpose(1, 2).contiguous().view(-1, self.hidden_size, self.height, self.width)
+
+        # reverse the patch embedding
+        x = self.reverse_patch_embedding(x)
+
         return x
 
 
