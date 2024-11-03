@@ -62,9 +62,9 @@ class DecoderAttention(nn.Module):
         # query, key, value projections
         q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
        
-        q = q.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2) 
-        k = k.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2) 
-        v = v.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2) 
+        q = q.view(B, T, self.config.num_attention_heads, C // self.config.num_attention_heads).transpose(1, 2) 
+        k = k.view(B, T, self.config.num_attention_heads, C // self.config.num_attention_heads).transpose(1, 2) 
+        v = v.view(B, T, self.config.num_attention_heads, C // self.config.num_attention_heads).transpose(1, 2) 
         
         y = F.scaled_dot_product_attention(q, k, v, is_causal=False) # flash attention
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
@@ -156,18 +156,18 @@ class Decoder(nn.Module):
         # check if the input projection dimension is equal to the embedding dimension
         # if not, add a linear layer to project the input to the embedding dimension
         # else, use the identity layer
-        if self.config.inproj_dim != self.config.hidden_size:
-            self.projector = nn.Linear(self.config.inproj_dim, self.config.hidden_size, bias=True)
+        if self.config.in_proj_dim != self.config.hidden_size:
+            self.projector = nn.Linear(self.config.in_proj_dim, self.config.hidden_size, bias=True)
             self.projector_norm = nn.LayerNorm(self.config.hidden_size, eps=config.layer_norm_eps)
         else:
             self.projector = nn.Identity()
             self.projector_norm = nn.Identity()
 
         self.mask_token = nn.Parameter(torch.zeros(1, 1, self.config.hidden_size))
-        self.position_embedding = nn.Embedding(self.num_positions, self.config.hidden_size)
+        self.position_embedding = nn.Embedding(self.config.num_image_tokens, self.config.hidden_size)
         self.register_buffer(
             "position_ids",
-            torch.arange(self.num_positions).expand((1, -1)),
+            torch.arange(self.config.num_image_tokens).expand((1, -1)),
             persistent=False,
         )
 
@@ -175,7 +175,7 @@ class Decoder(nn.Module):
         self.post_layernorm = nn.LayerNorm(self.config.hidden_size, eps=config.layer_norm_eps)
 
         # linear layer to project the output to the number of channels
-        self.predictor = nn.Linear(self.config.hidden_size, self.patch_size ** 2 * self.num_channels, bias=True)
+        self.predictor = nn.Linear(self.config.hidden_size, self.config.patch_size ** 2 * self.config.num_channels, bias=True)
     
 
     def reconstruct_sequence(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> torch.Tensor:
@@ -293,7 +293,7 @@ class Decoder(nn.Module):
         x = self.predictor(x)
 
         # calculate the loss
-        if self.do_loss_calculation:
+        if self.config.do_loss_calculation:
             loss = self.loss(target=target, prediction=x, mask=mask)
             return x, loss
         else:
