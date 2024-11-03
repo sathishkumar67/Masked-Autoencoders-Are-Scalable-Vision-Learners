@@ -295,9 +295,9 @@ class Decoder(nn.Module):
         # calculate the loss
         if self.config.do_loss_calculation:
             loss = self.loss(target=target, prediction=x, mask=mask)
-            return x, loss
+            return self.unpatchify(x), loss
         else:
-            return x
+            return self.unpatchify(x)
 
 
 class DecoderModel(nn.Module):
