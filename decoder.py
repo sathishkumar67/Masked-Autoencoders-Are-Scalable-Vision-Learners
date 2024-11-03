@@ -19,23 +19,42 @@ class DecoderConfig:
     layer_norm_eps: float = 1e-6
     attention_dropout: float = 0.0
     num_image_tokens: int = None
+    head_dim: int = None
     do_loss_calculation: bool = True
-    do_norm_pix_loss: bool = True
+    do_norm_pix_loss: bool = False
+    patched_image_height: int = None
+    patched_image_width: int = None
+
+    def __post_init__(self):
+        assert self.image_size % self.patch_size == 0, "Image size must be divisible by patch size"
+        assert self.hidden_size % self.num_attention_heads == 0, "Hidden size must be divisible by the number of attention heads"
+        assert self.num_channels == 3, "Number of channels must be 3"
+        assert all (value % 2 == 0 for value in [self.image_size, self.in_proj_dim, self.hidden_size, self.intermediate_size, self.num_hidden_layers, self.num_attention_heads, self.patch_size]), "All values must be even"
+        assert self.attention_dropout >= 0.0 and self.attention_dropout <= 1.0, "Attention dropout must be between 0.0 and 1.0"
+
+        if self.num_image_tokens is None:
+            self.num_image_tokens = (self.image_size // self.patch_size) ** 2
+
+        if self.head_dim is None:
+            self.head_dim = self.hidden_size // self.num_attention_heads
+
+        if self.patched_image_height is None:
+            self.patched_image_height = self.image_size // self.patch_size
+
+        if self.patched_image_width is None:
+            self.patched_image_width = self.image_size // self.patch_size
 
 
 class DecoderAttention(nn.Module):
+    """Multi-Head Attention module."""
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.embed_dim = config.hidden_size
-        self.num_heads = config.num_attention_heads
-        self.head_dim = self.embed_dim // self.num_heads
-        self.dropout = config.attention_dropout
 
-        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim)
-        self.v_proj = nn.Linear(self.embed_dim, self.embed_dim)
-        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim)
-        self.out_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.k_proj = nn.Linear(self.config.hidden_size, self.config.hidden_size)
+        self.v_proj = nn.Linear(self.config.hidden_size, self.config.hidden_size)
+        self.q_proj = nn.Linear(self.config.hidden_size, self.config.hidden_size)
+        self.out_proj = nn.Linear(self.config.hidden_size, self.config.hidden_size)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         B, T, C = hidden_states.shape
@@ -56,9 +75,11 @@ class DecoderAttention(nn.Module):
 
 
 class DecoderMLP(nn.Module):
+    """MLP module."""
     def __init__(self, config):
         super().__init__()
         self.config = config
+
         self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size)
         self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size)
 
@@ -74,13 +95,15 @@ class DecoderMLP(nn.Module):
 
 
 class DecoderLayer(nn.Module):
+    """Decoder layer module."""
     def __init__(self, config: DecoderConfig):
         super().__init__()
-        self.embed_dim = config.hidden_size
+        self.config = config
+
         self.self_attn = DecoderAttention(config)
-        self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.layer_norm1 = nn.LayerNorm(self.config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = DecoderMLP(config)
-        self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.layer_norm2 = nn.LayerNorm(self.config.hidden_size, eps=config.layer_norm_eps)
 
     # Ignore copy
     def forward(
@@ -108,17 +131,13 @@ class DecoderLayer(nn.Module):
 
 
 class DecoderBlock(nn.Module):
+    """Decoder block module."""
     def __init__(self, config: DecoderConfig):
         super().__init__()
         self.config = config
-        self.layers = nn.ModuleList(
-            [DecoderLayer(config) for _ in range(config.num_hidden_layers)]
-        )
+        self.layers = nn.ModuleList([DecoderLayer(config) for _ in range(config.num_hidden_layers)])
 
-    def forward(
-        self,
-        inputs_embeds: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
         # inputs_embeds: [Batch_Size, Num_Patches, Embed_Dim]
         hidden_states = inputs_embeds
 
@@ -132,34 +151,20 @@ class DecoderBlock(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, config):
         super().__init__()
-
-        embed_dim = config.hidden_size
-        in_proj_dim = config.in_proj_dim
-        out_channels = config.num_channels
-
         self.config = config
-        self.hidden_size = config.hidden_size
-        self.image_size = config.image_size
-        self.patch_size = config.patch_size
-        self.num_patches = (self.image_size // self.patch_size) ** 2
-        self.num_positions = self.num_patches
-        self.height = self.image_size // self.patch_size
-        self.width = self.image_size // self.patch_size
-        self.num_channels = self.config.num_channels 
-        self.do_loss_calculation = config.do_loss_calculation
 
         # check if the input projection dimension is equal to the embedding dimension
         # if not, add a linear layer to project the input to the embedding dimension
         # else, use the identity layer
-        if in_proj_dim != embed_dim:
-            self.projector = nn.Linear(in_proj_dim, embed_dim, bias=True)
-            self.projector_norm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+        if self.config.inproj_dim != self.config.hidden_size:
+            self.projector = nn.Linear(self.config.inproj_dim, self.config.hidden_size, bias=True)
+            self.projector_norm = nn.LayerNorm(self.config.hidden_size, eps=config.layer_norm_eps)
         else:
             self.projector = nn.Identity()
             self.projector_norm = nn.Identity()
 
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.position_embedding = nn.Embedding(self.num_positions, embed_dim)
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, self.config.hidden_size))
+        self.position_embedding = nn.Embedding(self.num_positions, self.config.hidden_size)
         self.register_buffer(
             "position_ids",
             torch.arange(self.num_positions).expand((1, -1)),
@@ -167,10 +172,10 @@ class Decoder(nn.Module):
         )
 
         self.decoder = DecoderBlock(config)
-        self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+        self.post_layernorm = nn.LayerNorm(self.config.hidden_size, eps=config.layer_norm_eps)
 
         # linear layer to project the output to the number of channels
-        self.predictor = nn.Linear(embed_dim, self.patch_size ** 2 * self.num_channels, bias=True)
+        self.predictor = nn.Linear(self.config.hidden_size, self.patch_size ** 2 * self.num_channels, bias=True)
     
 
     def reconstruct_sequence(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> torch.Tensor:
@@ -208,13 +213,13 @@ class Decoder(nn.Module):
         """
 
         # reshape the tensor
-        x = x.view(-1, self.num_channels, self.height, self.patch_size, self.width, self.patch_size)
+        x = x.reshape(-1, self.config.num_channels, self.config.patched_image_height, self.config.patch_size, self.config.patched_image_width, self.config.patch_size)
 
         # perform einsum operation
         x = torch.einsum('nchpwq->nhwpqc', x)
 
         # reshape the tensor
-        x = x.view(-1, self.height * self.width, self.patch_size **2 * self.num_channels)
+        x = x.reshape(-1, self.config.patched_image_height * self.config.patched_image_width, self.config.patch_size **2 * self.config.num_channels)
 
         # (Batch_Size, Num_Patches, Patch_Size ** 2 * Channels)
         return x
@@ -226,13 +231,13 @@ class Decoder(nn.Module):
         """
 
         # reshape the tensor
-        x = x.view(-1, self.height, self.width, self.patch_size, self.patch_size)
+        x = x.reshape(-1, self.config.patched_image_height, self.config.patched_image_width, self.config.patch_size, self.config.patch_size, self.config.num_channels)
 
         # perform einsum operation
         x = torch.einsum('nhwpqc->nchpwq', x)
 
         # reshape the tensor
-        x = x.view(-1, self.num_channels, self.height * self.patch_size, self.width * self.patch_size)
+        x = x.reshape(-1, self.config.num_channels, self.config.patched_image_height * self.config.patch_size, self.config.patched_image_width * self.config.patch_size)
 
         # (Batch_Size, Channels, Height, Width)
         return x
@@ -304,4 +309,4 @@ class DecoderModel(nn.Module):
 
     def forward(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor], target: torch.Tensor) -> Tuple:
         # [Batch_Size, Channels, Height, Width] -> [Batch_Size, Num_Patches, Embed_Dim]
-        return self.vision_model(x) 
+        return self.vision_model(x, target) 
