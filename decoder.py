@@ -265,7 +265,7 @@ class Decoder(nn.Module):
         return loss
 
 
-    def forward(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
+    def forward(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor], target: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of the Vision Transformer.
         Args:
@@ -289,7 +289,7 @@ class Decoder(nn.Module):
 
         # calculate the loss
         if self.do_loss_calculation:
-            loss = self.loss()
+            loss = self.loss(target=target, prediction=x, mask=mask)
             return x, loss
         else:
             return x
@@ -302,6 +302,6 @@ class DecoderModel(nn.Module):
         self.config = config
         self.vision_model = Decoder(config)
 
-    def forward(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple:
+    def forward(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor], target: torch.Tensor) -> Tuple:
         # [Batch_Size, Channels, Height, Width] -> [Batch_Size, Num_Patches, Embed_Dim]
         return self.vision_model(x) 
