@@ -19,6 +19,8 @@ class DecoderConfig:
     layer_norm_eps: float = 1e-6
     attention_dropout: float = 0.0
     num_image_tokens: int = None
+    do_loss_calculation: bool = True
+    do_norm_pix_loss: bool = True
 
 
 class DecoderAttention(nn.Module):
@@ -143,6 +145,8 @@ class Decoder(nn.Module):
         self.num_positions = self.num_patches
         self.height = self.image_size // self.patch_size
         self.width = self.image_size // self.patch_size
+        self.num_channels = self.config.num_channels 
+        self.do_loss_calculation = config.do_loss_calculation
 
         # check if the input projection dimension is equal to the embedding dimension
         # if not, add a linear layer to project the input to the embedding dimension
@@ -165,11 +169,8 @@ class Decoder(nn.Module):
         self.decoder = DecoderBlock(config)
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
-        self.reverse_patch_embedding = nn.ConvTranspose2d(
-            in_channels=embed_dim,
-            out_channels=self.config.num_channels,
-            kernel_size=self.config.patch_size,
-            stride=self.config.patch_size)
+        # linear layer to project the output to the number of channels
+        self.predictor = nn.Linear(embed_dim, self.patch_size ** 2 * self.num_channels, bias=True)
     
 
     def reconstruct_sequence(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> torch.Tensor:
@@ -198,7 +199,70 @@ class Decoder(nn.Module):
         # unshuflle the tokens to the original order
         encoded_tokens_masked = torch.gather(encoded_tokens_masked, 1, index=ids_restore.unsqueeze(-1).repeat(1, 1, encoded_tokens.shape[2]))
 
-        return encoded_tokens_masked
+        return encoded_tokens_masked, mask, ids_restore
+    
+    def patchify(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: [Batch_Size, Channels, Height, Width]
+        output: [Batch_Size, Num_Patches, Patch_Size ** 2 * Channels]
+        """
+
+        # reshape the tensor
+        x = x.view(-1, self.num_channels, self.height, self.patch_size, self.width, self.patch_size)
+
+        # perform einsum operation
+        x = torch.einsum('nchpwq->nhwpqc', x)
+
+        # reshape the tensor
+        x = x.view(-1, self.height * self.width, self.patch_size **2 * self.num_channels)
+
+        # (Batch_Size, Num_Patches, Patch_Size ** 2 * Channels)
+        return x
+    
+    def unpatchify(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: [Batch_Size, Num_Patches, Patch_Size ** 2 * Channels]
+        output: [Batch_Size, Channels, Height, Width]
+        """
+
+        # reshape the tensor
+        x = x.view(-1, self.height, self.width, self.patch_size, self.patch_size)
+
+        # perform einsum operation
+        x = torch.einsum('nhwpqc->nchpwq', x)
+
+        # reshape the tensor
+        x = x.view(-1, self.num_channels, self.height * self.patch_size, self.width * self.patch_size)
+
+        # (Batch_Size, Channels, Height, Width)
+        return x
+    
+    def loss(self, target: torch.Tensor, prediction: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """
+        Calculate the loss of the decoder model.
+        Args:
+            target (torch.Tensor): Target tensor of shape [Batch_Size, Channels, Height, Width].
+            prediction (torch.Tensor): Prediction tensor of shape [Batch_Size, Num_Patches, Patch_Size ** 2 * Channels].
+            mask (torch.Tensor): Binary mask of shape [Batch_Size, Num_Patches]. 0 is keep, 1 is remove
+
+        Returns:
+            torch.Tensor: Loss tensor of shape [].
+        """
+        # calculate the loss
+        target = self.patchify(target)
+
+        # do normalization if needed
+        if self.config.do_norm_pix_loss:
+            mean = target.mean(dim=-1, keepdim=True)
+            var = target.var(dim=-1, keepdim=True)
+            target = (target - mean) / (var + 1e-6) ** 0.5
+
+        # calculate the loss
+        loss = (prediction - target) ** 2
+        loss = loss.mean(dim=-1)  # mean over all channels
+        loss = (loss * mask).sum() / mask.sum()  # mean only over non-ignored pixels
+
+        return loss
 
 
     def forward(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
@@ -212,7 +276,7 @@ class Decoder(nn.Module):
         """
 
         # Reconstruct the original sequence
-        x = self.reconstruct_sequence(x)
+        x, mask, ids_restore = self.reconstruct_sequence(x)
 
         # pass the reconstructed sequence through the decoder
         x = self.decoder(x)
@@ -220,13 +284,15 @@ class Decoder(nn.Module):
         # apply layer normalization
         x = self.post_layernorm(x)
 
-        # reshape the tensor
-        x = x.transpose(1, 2).contiguous().view(-1, self.hidden_size, self.height, self.width)
+        # pass the output through the predictor
+        x = self.predictor(x)
 
-        # reverse the patch embedding
-        x = self.reverse_patch_embedding(x)
-
-        return x
+        # calculate the loss
+        if self.do_loss_calculation:
+            loss = self.loss()
+            return x, loss
+        else:
+            return x
 
 
 class DecoderModel(nn.Module):
