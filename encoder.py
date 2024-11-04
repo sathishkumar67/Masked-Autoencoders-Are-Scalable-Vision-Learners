@@ -135,7 +135,7 @@ class EncoderLayer(nn.Module):
         # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
         hidden_states = self.layer_norm1(hidden_states)
         # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states, _ = self.self_attn(hidden_states=hidden_states)
+        hidden_states = self.self_attn(hidden_states=hidden_states)
         # [Batch_Size, Num_Patches, Embed_Dim]
         hidden_states = residual + hidden_states
         # residual: [Batch_Size, Num_Patches, Embed_Dim] 
@@ -241,7 +241,7 @@ class Encoder(nn.Module):
         last_hidden_state = self.post_layernorm(last_hidden_state)
 
         # Return the output and the binary mask, and the indices to restore the original order
-        return last_hidden_state, mask, ids_restore, hidden_states
+        return last_hidden_state, mask, ids_restore
 
 
 

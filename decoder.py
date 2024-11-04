@@ -32,17 +32,10 @@ class DecoderConfig:
         assert all (value % 2 == 0 for value in [self.image_size, self.in_proj_dim, self.hidden_size, self.intermediate_size, self.num_hidden_layers, self.num_attention_heads, self.patch_size]), "All values must be even"
         assert self.attention_dropout >= 0.0 and self.attention_dropout <= 1.0, "Attention dropout must be between 0.0 and 1.0"
 
-        if self.num_image_tokens is None:
-            self.num_image_tokens = (self.image_size // self.patch_size) ** 2
-
-        if self.head_dim is None:
-            self.head_dim = self.hidden_size // self.num_attention_heads
-
-        if self.patched_image_height is None:
-            self.patched_image_height = self.image_size // self.patch_size
-
-        if self.patched_image_width is None:
-            self.patched_image_width = self.image_size // self.patch_size
+        self.num_image_tokens = (self.image_size // self.patch_size) ** 2
+        self.head_dim = self.hidden_size // self.num_attention_heads
+        self.patched_image_height = self.image_size // self.patch_size
+        self.patched_image_width = self.image_size // self.patch_size
 
 
 class DecoderAttention(nn.Module):
@@ -115,7 +108,7 @@ class DecoderLayer(nn.Module):
         # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
         hidden_states = self.layer_norm1(hidden_states)
         # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states, _ = self.self_attn(hidden_states=hidden_states)
+        hidden_states = self.self_attn(hidden_states=hidden_states)
         # [Batch_Size, Num_Patches, Embed_Dim]
         hidden_states = residual + hidden_states
         # residual: [Batch_Size, Num_Patches, Embed_Dim] 
