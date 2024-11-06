@@ -3,5 +3,4 @@
 3. hyperparamter tunning
 4. correct configurations
 
-# implemented efficient decoder and loss
-# need to implement efficient encoder
+# need to implement normalization before calculating loss 
