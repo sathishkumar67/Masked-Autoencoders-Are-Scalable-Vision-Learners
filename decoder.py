@@ -250,12 +250,28 @@ class Decoder(nn.Module):
         target = self.patchify(target)
 
         
+        # normalization for only target
         # do normalization if needed
-        # if self.config.do_norm_pix_loss:                                          # need to check this
+        # if self.config.do_norm_pix_loss:                                          
         #     mean = target.mean(dim=-1, keepdim=True)
         #     var = target.var(dim=-1, keepdim=True)
         #     target = (target - mean) / (var + 1e-6) ** 0.5
-        #     prediction = (prediction - mean) / (var + 1e-6) ** 0.5
+
+        # normalized for both target and prediction
+        # mean_pred = masked_prediction.mean(dim=-1, keepdim=True)
+        # std_pred = masked_prediction.std(dim=-1, keepdim=True) + 1e-8  # small epsilon to avoid division by zero
+        # normalized_prediction = (masked_prediction - mean_pred) / std_pred
+        # mean_target = masked_target.mean(dim=-1, keepdim=True)
+        # std_target = masked_target.std(dim=-1, keepdim=True) + 1e-8
+        # normalized_target = (masked_target - mean_target) / std_target
+        # # Calculate mean squared error on the normalized masked patches
+        # loss = F.mse_loss(normalized_prediction, normalized_target, reduction='mean')
+
+        # normalization for both target and prediction using built-in function
+        # Normalize using layer normalization
+        # normalized_prediction = F.layer_norm(masked_prediction, masked_prediction.shape[-1:])
+        # normalized_target = F.layer_norm(masked_target, masked_target.shape[-1:])
+
 
         # manual loss calculation
         # loss = (prediction - target) ** 2
