@@ -59,7 +59,7 @@ class DecoderAttention(nn.Module):
         k = k.view(B, T, self.config.num_attention_heads, C // self.config.num_attention_heads).transpose(1, 2) 
         v = v.view(B, T, self.config.num_attention_heads, C // self.config.num_attention_heads).transpose(1, 2) 
         
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=False) # flash attention
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=self.config.attention_dropout) # flash attention
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
         
         # output projection
@@ -249,16 +249,37 @@ class Decoder(nn.Module):
         # calculate the loss
         target = self.patchify(target)
 
+        
         # do normalization if needed
-        if self.config.do_norm_pix_loss:
-            mean = target.mean(dim=-1, keepdim=True)
-            var = target.var(dim=-1, keepdim=True)
-            target = (target - mean) / (var + 1e-6) ** 0.5
+        # if self.config.do_norm_pix_loss:                                          # need to check this
+        #     mean = target.mean(dim=-1, keepdim=True)
+        #     var = target.var(dim=-1, keepdim=True)
+        #     target = (target - mean) / (var + 1e-6) ** 0.5
+        #     prediction = (prediction - mean) / (var + 1e-6) ** 0.5
 
-        # calculate the loss
-        loss = (prediction - target) ** 2
-        loss = loss.mean(dim=-1)  # mean over all channels
-        loss = (loss * mask).sum() / mask.sum()  # mean only over non-ignored pixels
+        # manual loss calculation
+        # loss = (prediction - target) ** 2
+        # loss = loss.mean(dim=-1)  # mean over all channels
+        # loss = (loss * mask).sum() / mask.sum()  # mean only over non-ignored pixels
+
+        # hybrid approach
+        # Step 1: Calculate the element-wise MSE loss without reduction
+        # loss = F.mse_loss(prediction, target, reduction='none')  # Shape: [Batch_Size, Num_Patches, Patch_Size ** 2 * Channels]
+        # # Step 2: Take the mean across the channel dimension to match mask shape
+        # loss = loss.mean(dim=-1)  # Shape: [Batch_Size, Num_Patches]
+        # # Step 3: Apply the mask and compute the mean loss over the masked tokens
+        # masked_loss = (loss * mask).sum() / mask.sum()
+
+        # direct approach
+        # Expand mask to match the shape of the patches
+        mask_expanded = mask.unsqueeze(-1).expand_as(prediction)
+
+        # Filter out only the masked patches (where mask is 1)
+        masked_prediction = prediction[mask_expanded == 1].view(-1, prediction.shape[-1])
+        masked_target = target[mask_expanded == 1].view(-1, target.shape[-1])
+
+        # Calculate mean squared error only on the masked patches
+        loss = F.mse_loss(masked_prediction, masked_target, reduction='mean')
 
         return loss
 
