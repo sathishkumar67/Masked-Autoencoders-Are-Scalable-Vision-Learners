@@ -49,8 +49,10 @@ class EncoderEmbeddings(nn.Module):
             kernel_size=config.patch_size,
             stride=config.patch_size,
             padding="valid", # This indicates no padding is added
+            bias=True # adding bias
         )
 
+        # Positional embeddings for the patches
         self.position_embedding = nn.Embedding(config.num_image_tokens, config.hidden_size)
         self.register_buffer(
             "position_ids",
@@ -59,64 +61,48 @@ class EncoderEmbeddings(nn.Module):
         )
 
     def forward(self, pixel_values: torch.FloatTensor) -> torch.Tensor:
-        # Convolve the `patch_size` kernel over the image, with no overlapping patches since the stride is equal to the kernel size
-        # The output of the convolution will have shape [Batch_Size, Embed_Dim, Num_Patches_H, Num_Patches_W]
-        patch_embeds = self.patch_embedding(pixel_values)
-        # [Batch_Size, Embed_Dim, Num_Patches_H, Num_Patches_W] -> [Batch_Size, Embed_Dim, Num_Patches] -> [Batch_Size, Num_Patches, Embed_Dim]
-        embeddings = patch_embeds.flatten(2).transpose(1, 2)
-        # Add position embeddings to each patch. Each positional encoding is a vector of size [Embed_Dim]
-        embeddings = embeddings + self.position_embedding(self.position_ids)
         # [Batch_Size, Num_Patches, Embed_Dim]
-        return embeddings
+        return self.patch_embedding(pixel_values).flatten(2).transpose(1, 2) + self.position_embedding(self.position_ids)
 
 
 class EncoderAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.config.num_attention_heads = config.num_attention_heads
-        self.dropout = config.attention_dropout
 
-        self.k_proj = nn.Linear(config.hidden_size, config.hidden_size)
-        self.v_proj = nn.Linear(config.hidden_size, config.hidden_size)
-        self.q_proj = nn.Linear(config.hidden_size, config.hidden_size)
-        self.out_proj = nn.Linear(config.hidden_size, config.hidden_size)
+        # key, query, value projections for all heads, but in a batch
+        self.qkv_proj = nn.Linear(config.hidden_size, 3 * config.hidden_size, bias=True)
+        self.out_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=True)
+        self.out_proj.SCALE_INIT = 1
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         B, T, C = hidden_states.shape
 
         # query, key, value projections
-        q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
+        q, k, v = self.qkv_proj(hidden_states).split(self.config.hidden_size, dim=-1)
        
+       # reshape for multihead self attention
         q = q.view(B, T, self.config.num_attention_heads, C // self.config.num_attention_heads).transpose(1, 2) 
         k = k.view(B, T, self.config.num_attention_heads, C // self.config.num_attention_heads).transpose(1, 2) 
         v = v.view(B, T, self.config.num_attention_heads, C // self.config.num_attention_heads).transpose(1, 2) 
         
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=self.dropout) # flash attention
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
-        
-        # output projection
-        y = self.out_proj(y)
-        return y
+        # attention and out projection
+        return self.out_proj(F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=self.config.attention_dropout).transpose(1, 2).contiguous().view(B, T, C))
 
 
 
-class EncoderMLP(nn.Module):
+class EncoderMLP(nn.Module): # This is lightweight MLP if needed use gpt2_turbo MLP
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size)
         self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.fc2.SCALE_INIT = 1
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Intermediate_Size]
-        hidden_states = self.fc1(hidden_states)
-        # hidden_states: [Batch_Size, Num_Patches, Intermediate_Size]
-        hidden_states = F.gelu(hidden_states, approximate="tanh")
-        # [Batch_Size, Num_Patches, Intermediate_Size] -> [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = self.fc2(hidden_states)
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:        
+        # hidden_states: [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Intermediate_Size]
+        return self.fc2(F.gelu(self.fc1(hidden_states), approximate="tanh"))
 
-        return hidden_states
 
 
 class EncoderLayer(nn.Module):
@@ -128,43 +114,22 @@ class EncoderLayer(nn.Module):
         self.mlp = EncoderMLP(config)
         self.layer_norm2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
-    # Ignore copy
-    def forward(
-        self,
-        hidden_states: torch.Tensor
-    ) -> torch.Tensor:
-        # residual: [Batch_Size, Num_Patches, Embed_Dim]
-        residual = hidden_states
-        # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = self.layer_norm1(hidden_states)
-        # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = self.self_attn(hidden_states=hidden_states)
-        # [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = residual + hidden_states
-        # residual: [Batch_Size, Num_Patches, Embed_Dim] 
-        residual = hidden_states
-        # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = self.layer_norm2(hidden_states)
-        # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = self.mlp(hidden_states)
-        # [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = residual + hidden_states
-        
-        return hidden_states
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
+        x = x + self.self_attn(self.layer_norm1(x)) # attention block
+        # x: [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
+        x = x + self.mlp(self.layer_norm2(x)) # mlp block
+        # x: [Batch_Size, Num_Patches, Embed_Dim]
+        return x
 
 
 class EncoderBlock(nn.Module):
     def __init__(self, config: EncoderConfig):
         super().__init__()
         self.config = config
-        self.layers = nn.ModuleList(
-            [EncoderLayer(config) for _ in range(config.num_hidden_layers)]
-        )
+        self.layers = nn.ModuleList([EncoderLayer(config) for _ in range(config.num_hidden_layers)])
 
-    def forward(
-        self,
-        inputs_embeds: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
         # inputs_embeds: [Batch_Size, Num_Patches, Embed_Dim]
         hidden_states = inputs_embeds
 
@@ -172,6 +137,7 @@ class EncoderBlock(nn.Module):
             # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
             hidden_states = encoder_layer(hidden_states)
 
+        # hidden_states: [Batch_Size, Num_Patches, Embed_Dim]
         return hidden_states
 
 
@@ -200,8 +166,7 @@ class Encoder(nn.Module):
         len_keep = int(L * (1 - self.config.mask_ratio))  # Number of tokens to keep
 
         # Generate random noise and shuffle tokens
-        noise = torch.rand(N, L)
-        ids_shuffle = torch.argsort(noise, dim=1)  # Shuffle by sorting noise
+        ids_shuffle = torch.argsort(torch.rand(N, L), dim=1)  # Shuffle by sorting noise
         ids_restore = torch.argsort(ids_shuffle, dim=1)  # Indices to restore original order
 
         # Keep only a subset of tokens
@@ -234,16 +199,9 @@ class Encoder(nn.Module):
         else:
             masked_hidden_states = hidden_states
             mask, ids_restore = None, None
-            
-        # Pass the masked embeddings to the encoder
-        last_hidden_state = self.encoder(inputs_embeds=masked_hidden_states)
-
-        # Apply layer normalization
-        last_hidden_state = self.post_layernorm(last_hidden_state)
 
         # Return the output and the binary mask, and the indices to restore the original order
-        return last_hidden_state, mask, ids_restore
-
+        return self.post_layernorm(self.encoder(masked_hidden_states)), mask, ids_restore
 
 
 class EncoderModel(nn.Module):
