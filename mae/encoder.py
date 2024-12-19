@@ -25,12 +25,14 @@ class EncoderConfig:
     num_image_tokens: int = None
 
     def __post_init__(self):
+        # Check if the values are valid
         assert self.image_size % self.patch_size == 0, "Image size must be divisible by patch size"
         assert self.hidden_size % self.num_attention_heads == 0, "Hidden size must be divisible by the number of attention heads"
         assert self.num_channels == 3, "Number of channels must be 3"
         assert all (value % 2 == 0 for value in [self.image_size, self.hidden_size, self.intermediate_size, self.num_hidden_layers, self.num_attention_heads, self.patch_size]), "All values must be even"
         assert self.attention_dropout >= 0.0 and self.attention_dropout <= 1.0, "Attention dropout must be between 0.0 and 1.0"
 
+        # Calculate values after initialization
         self.num_image_tokens = (self.image_size // self.patch_size) ** 2
         self.head_dim = self.hidden_size // self.num_attention_heads
         self.patched_image_height = self.image_size // self.patch_size
@@ -39,6 +41,15 @@ class EncoderConfig:
 
 class EncoderEmbeddings(nn.Module):
     def __init__(self, config: EncoderConfig):
+        """
+        __init__ method of the EncoderEmbeddings class.
+
+        Args:
+            config (EncoderConfig): Configuration object containing model hyperparameters.
+
+        Initializes the EncoderEmbeddings class with a convolutional layer to project the input image into patches of size `patch_size`
+        and a positional embedding layer to add positional embeddings to the patches.
+        """
         super().__init__()
         self.config = config
 
@@ -61,21 +72,49 @@ class EncoderEmbeddings(nn.Module):
         )
 
     def forward(self, pixel_values: torch.FloatTensor) -> torch.Tensor:
+        """
+        Forward pass of the EncoderEmbeddings module.
+
+        Args:
+            pixel_values (torch.FloatTensor): Input image tensor of shape [Batch_Size, Channels, Height, Width].
+
+        Returns:
+            torch.Tensor: Output tensor of shape [Batch_Size, Num_Patches, Embed_Dim] after applying convolution-based patch embedding 
+            and adding positional embeddings.
+        """
         # [Batch_Size, Num_Patches, Embed_Dim]
         return self.patch_embedding(pixel_values).flatten(2).transpose(1, 2) + self.position_embedding(self.position_ids)
 
 
 class EncoderAttention(nn.Module):
     def __init__(self, config):
+        """
+        __init__ method of the EncoderAttention class.
+
+        Args:
+            config (EncoderConfig): Configuration object containing model hyperparameters.
+
+        Initializes the EncoderAttention class with key, query, value projections and output projection.
+        """
         super().__init__()
         self.config = config
 
         # key, query, value projections for all heads, but in a batch
         self.qkv_proj = nn.Linear(config.hidden_size, 3 * config.hidden_size, bias=True)
+        # output projection 
         self.out_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=True)
         self.out_proj.SCALE_INIT = 1
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the EncoderAttention module.
+
+        Args:
+            hidden_states (torch.Tensor): Input tensor of shape [Batch_Size, Num_Patches, Embed_Dim].
+
+        Returns:
+            torch.Tensor: Final output after the scaled dot product attention and the output linear layer.
+        """
         B, T, C = hidden_states.shape
 
         # query, key, value projections
@@ -87,12 +126,21 @@ class EncoderAttention(nn.Module):
         v = v.view(B, T, self.config.num_attention_heads, C // self.config.num_attention_heads).transpose(1, 2) 
         
         # attention and out projection
+        # [Batch_Size, Num_Patches, Dim]
         return self.out_proj(F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=self.config.attention_dropout).transpose(1, 2).contiguous().view(B, T, C))
 
 
 
 class EncoderMLP(nn.Module): # This is lightweight MLP if needed use gpt2_turbo MLP
     def __init__(self, config):
+        """
+        __init__ method of the EncoderMLP class.
+
+        Args:
+            config (EncoderConfig): Configuration object containing model hyperparameters.
+
+        Initializes the EncoderMLP class with two linear layers. The first layer projects the input to the intermediate size, and the second layer projects the output to the hidden size.
+        """
         super().__init__()
         self.config = config
         self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size)
@@ -100,13 +148,30 @@ class EncoderMLP(nn.Module): # This is lightweight MLP if needed use gpt2_turbo 
         self.fc2.SCALE_INIT = 1
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:        
+        """
+        Forward pass of the EncoderMLP module.
+
+        Args:
+            hidden_states (torch.Tensor): Input tensor of shape [Batch_Size, Num_Patches, Embed_Dim].
+
+        Returns:
+            torch.Tensor: Final output after the two linear layers with GELU activation.
+        """
         # hidden_states: [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Intermediate_Size]
         return self.fc2(F.gelu(self.fc1(hidden_states), approximate="tanh"))
 
 
 
 class EncoderLayer(nn.Module):
-    def __init__(self, config: EncoderConfig):
+    def __init__(self, config: EncoderConfig) -> None:
+        """
+        Initialize an EncoderLayer instance.
+
+        Args:
+            config (EncoderConfig): Configuration object containing model hyperparameters.
+
+        Initializes the EncoderLayer with self-attention, layer normalization, and MLP components.
+        """
         super().__init__()
         self.config = config
         self.self_attn = EncoderAttention(config)
@@ -115,21 +180,45 @@ class EncoderLayer(nn.Module):
         self.layer_norm2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the EncoderLayer module.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape [Batch_Size, Num_Patches, Embed_Dim].
+
+        Returns:
+            torch.Tensor: Final output after self-attention and mlp block.
+        """
         # x: [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        x = x + self.self_attn(self.layer_norm1(x)) # attention block
+        x = x + self.self_attn(self.layer_norm1(x))
         # x: [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        x = x + self.mlp(self.layer_norm2(x)) # mlp block
+        x = x + self.mlp(self.layer_norm2(x))
         # x: [Batch_Size, Num_Patches, Embed_Dim]
         return x
 
 
 class EncoderBlock(nn.Module):
-    def __init__(self, config: EncoderConfig):
+    def __init__(self, config: EncoderConfig) -> None:
+        """
+        Constructor for the EncoderBlock class.
+
+        Args:
+            config (EncoderConfig): Configuration object containing model hyperparameters.
+
+        Initializes the EncoderBlock class with a list of EncoderLayer objects.
+        """
         super().__init__()
         self.config = config
         self.layers = nn.ModuleList([EncoderLayer(config) for _ in range(config.num_hidden_layers)])
 
     def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters:
+            inputs_embeds (torch.Tensor): input embeddings of shape (Batch_Size, Num_Patches, Embed_Dim)
+
+        Returns:
+            torch.Tensor: output embeddings of shape (Batch_Size, Num_Patches, Embed_Dim)
+        """
         # inputs_embeds: [Batch_Size, Num_Patches, Embed_Dim]
         hidden_states = inputs_embeds
 
@@ -142,7 +231,15 @@ class EncoderBlock(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config) -> None:
+        """
+        __init__ method of the Encoder class.
+
+        Args:
+            config (EncoderConfig): Configuration for the Encoder.
+
+        Initializes the Encoder class with the given configuration. The Encoder consists of an embedding layer, a block of encoder layers, and a layer normalization layer.
+        """
         super().__init__()
         self.config = config
 
@@ -181,7 +278,7 @@ class Encoder(nn.Module):
         # return masked embeddings, binary mask and indices to restore the original order
         return x_masked, mask, ids_restore
 
-    def forward(self, pixel_values: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, pixel_values: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, None, None]:
         """
         Forward pass of the vision transformer.
         
@@ -197,6 +294,7 @@ class Encoder(nn.Module):
             # Apply random masking to the embeddings
             masked_hidden_states, mask, ids_restore = self.random_masking(hidden_states)
         else:
+            # No masking applied to the embeddings
             masked_hidden_states = hidden_states
             mask, ids_restore = None, None
 
@@ -205,12 +303,33 @@ class Encoder(nn.Module):
 
 
 class EncoderModel(nn.Module):
+    def __init__(self, config: EncoderConfig) -> None:
+        """
+        Constructor for the EncoderModel.
 
-    def __init__(self, config: EncoderConfig):
+        Args:
+            config (EncoderConfig): Configuration object containing model hyperparameters.
+
+        Returns:
+            contextual_embeddings (torch.Tensor): Output tensor of the model.
+            mask (torch.Tensor): Binary mask showing which tokens were masked (1) or kept (0).
+            ids_restore (torch.Tensor): Indices to restore the original order of tokens.
+        """
         super().__init__()
         self.config = config
         self.vision_model = Encoder(config)
 
-    def forward(self, pixel_values) -> Tuple:
+    def forward(self, pixel_values: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, None, None]:
+        """
+        Forward pass of the vision transformer model.
+
+        Args:
+            pixel_values (torch.Tensor): Input image tensor of shape [Batch_Size, Channels, Height, Width].
+
+        Returns:
+            contextual_embeddings (torch.Tensor): Output tensor of the model.
+            mask (torch.Tensor): Binary mask showing which tokens were masked (1) or kept (0).
+            ids_restore (torch.Tensor): Indices to restore the original order of tokens.
+        """
         # [Batch_Size, Channels, Height, Width] -> [Batch_Size, Num_Patches, Embed_Dim]
         return self.vision_model(pixel_values=pixel_values) 
