@@ -1,6 +1,3 @@
-1. test rms normalization whether it works for image domains like it worked for text domains init and scale factor before passing into softmax
-2. training
-3. hyperparamter tunning
-4. correct configurations
-
-# need to implement normalization before calculating loss 
+# testing out rms normalization
+# add [CLS] and register tokens
+# refactor and optimize decoder
