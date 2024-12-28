@@ -1,3 +1,2 @@
 # testing out rms normalization
 # add [CLS] and register tokens
-# refactor and optimize decoder
