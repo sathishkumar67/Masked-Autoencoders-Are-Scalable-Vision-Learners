@@ -1,6 +1,6 @@
 from __future__ import annotations
 import torch
-from torch import nn
+import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Tuple
@@ -16,12 +16,11 @@ class DecoderConfig:
     num_attention_heads: int
     num_channels: int
     patch_size: int
-    layer_norm_eps: float = 1e-6
+    layer_norm_eps: float = 1e-8
     attention_dropout: float = 0.0
     num_image_tokens: int = None
     head_dim: int = None
     do_loss_calculation: bool = True
-    do_norm_pix_loss: bool = False
     patched_image_height: int = None
     patched_image_width: int = None
 
@@ -39,57 +38,90 @@ class DecoderConfig:
 
 
 class DecoderAttention(nn.Module):
-    """Multi-Head Attention module."""
-    def __init__(self, config):
+    def __init__(self, config) -> None:
+        """
+        Initializes the DecoderAttention class.
+
+        Args:
+            config (DecoderConfig): Configuration object containing model hyperparameters.
+
+        The initializer sets up key, query, value projections for all heads in a batch and an output projection.
+        """
         super().__init__()
         self.config = config
 
-        self.k_proj = nn.Linear(self.config.hidden_size, self.config.hidden_size)
-        self.v_proj = nn.Linear(self.config.hidden_size, self.config.hidden_size)
-        self.q_proj = nn.Linear(self.config.hidden_size, self.config.hidden_size)
-        self.out_proj = nn.Linear(self.config.hidden_size, self.config.hidden_size)
+        # key, query, value projections for all heads, but in a batch
+        self.qkv_proj = nn.Linear(config.hidden_size, 3 * config.hidden_size, bias=True)
+        # output projection 
+        self.out_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=True)
+        self.out_proj.SCALE_INIT = 1
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the DecoderAttention module.
+
+        Args:
+            hidden_states (torch.Tensor): Input tensor of shape [Batch_Size, Num_Patches, Embed_Dim].
+
+        Returns:
+            torch.Tensor: Final output after the scaled dot product attention and the output linear layer.
+        """
         B, T, C = hidden_states.shape
 
         # query, key, value projections
-        q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
-       
+        q, k, v = self.qkv_proj(hidden_states).split(self.config.hidden_size, dim=-1)
+
+        # reshape q, k, v for multi-head attention
         q = q.view(B, T, self.config.num_attention_heads, C // self.config.num_attention_heads).transpose(1, 2) 
         k = k.view(B, T, self.config.num_attention_heads, C // self.config.num_attention_heads).transpose(1, 2) 
         v = v.view(B, T, self.config.num_attention_heads, C // self.config.num_attention_heads).transpose(1, 2) 
         
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=self.config.attention_dropout) # flash attention
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
-        
-        # output projection
-        y = self.out_proj(y)
-        return y
+        # attention and out projection
+        # [Batch_Size, Num_Patches, Dim]
+        return self.out_proj(F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=self.config.attention_dropout).transpose(1, 2).contiguous().view(B, T, C))
 
 
-class DecoderMLP(nn.Module):
-    """MLP module."""
-    def __init__(self, config):
+class DecoderMLP(nn.Module): # This is lightweight MLP if needed use gpt2_turbo MLP
+    def __init__(self, config) -> None:
+        """
+        __init__ method of the DecoderMLP class.
+
+        Args:
+            config (DecoderConfig): Configuration object containing model hyperparameters.
+
+        Initializes the DecoderMLP class with two linear layers. The first layer projects the input to the intermediate size, and the second layer projects the output to the hidden size.
+        """
         super().__init__()
         self.config = config
 
         self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size)
         self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.fc2.SCALE_INIT = 1
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Intermediate_Size]
-        hidden_states = self.fc1(hidden_states)
-        # hidden_states: [Batch_Size, Num_Patches, Intermediate_Size]
-        hidden_states = F.gelu(hidden_states, approximate="tanh")
-        # [Batch_Size, Num_Patches, Intermediate_Size] -> [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = self.fc2(hidden_states)
+        """
+        Forward pass of the DecoderMLP module.
 
-        return hidden_states
+        Args:
+            hidden_states (torch.Tensor): Input tensor of shape [Batch_Size, Num_Patches, Embed_Dim].
+
+        Returns:
+            torch.Tensor: Final output after the two linear layers with GELU activation.
+        """
+        # hidden_states: [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Intermediate_Size]
+        return self.fc2(F.gelu(self.fc1(hidden_states), approximate="tanh"))
 
 
 class DecoderLayer(nn.Module):
-    """Decoder layer module."""
-    def __init__(self, config: DecoderConfig):
+    def __init__(self, config: DecoderConfig) -> None:
+        """
+        Initializes the DecoderLayer class with self-attention, layer normalization, and MLP components.
+
+        Args:
+            config (DecoderConfig): Configuration object containing model hyperparameters.
+
+        The initializer sets up a self-attention module, two layer normalization modules, and an MLP module.
+        """
         super().__init__()
         self.config = config
 
@@ -99,38 +131,48 @@ class DecoderLayer(nn.Module):
         self.layer_norm2 = nn.LayerNorm(self.config.hidden_size, eps=config.layer_norm_eps)
 
     # Ignore copy
-    def forward(
-        self,
-        hidden_states: torch.Tensor
-    ) -> torch.Tensor:
-        # residual: [Batch_Size, Num_Patches, Embed_Dim]
-        residual = hidden_states
-        # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = self.layer_norm1(hidden_states)
-        # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = self.self_attn(hidden_states=hidden_states)
-        # [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = residual + hidden_states
-        # residual: [Batch_Size, Num_Patches, Embed_Dim] 
-        residual = hidden_states
-        # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = self.layer_norm2(hidden_states)
-        # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = self.mlp(hidden_states)
-        # [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = residual + hidden_states
-        
-        return hidden_states
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the DecoderLayer module.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape [Batch_Size, Num_Patches, Embed_Dim].
+
+        Returns:
+            torch.Tensor: Final output after self-attention and mlp block.
+        """
+        # x: [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
+        x = x + self.self_attn(self.layer_norm1(x))
+        # x: [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
+        x = x + self.mlp(self.layer_norm2(x))
+        # x: [Batch_Size, Num_Patches, Embed_Dim]
+        return x
 
 
 class DecoderBlock(nn.Module):
-    """Decoder block module."""
-    def __init__(self, config: DecoderConfig):
+    def __init__(self, config: DecoderConfig) -> None:
+        """
+        Initializes the DecoderBlock class with a list of DecoderLayer objects.
+
+        Args:
+            config (DecoderConfig): Configuration object containing model hyperparameters.
+
+        The initializer sets up a list of DecoderLayer objects, each of which contains a self-attention module, two layer normalization modules, and an MLP module.
+        """
         super().__init__()
         self.config = config
         self.layers = nn.ModuleList([DecoderLayer(config) for _ in range(config.num_hidden_layers)])
 
     def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the DecoderBlock module.
+
+        Args:
+            inputs_embeds (torch.Tensor): Input tensor of shape [Batch_Size, Num_Patches, Embed_Dim].
+
+        Returns:
+            torch.Tensor: Final output after the decoder block.
+        """
         # inputs_embeds: [Batch_Size, Num_Patches, Embed_Dim]
         hidden_states = inputs_embeds
 
@@ -138,6 +180,7 @@ class DecoderBlock(nn.Module):
             # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
             hidden_states = decoder_layer(hidden_states)
 
+        # [Batch_Size, Num_Patches, Embed_Dim]
         return hidden_states
 
 
@@ -204,7 +247,6 @@ class Decoder(nn.Module):
         x: [Batch_Size, Channels, Height, Width]
         output: [Batch_Size, Num_Patches, Patch_Size ** 2 * Channels]
         """
-
         # reshape the tensor
         x = x.reshape(-1, self.config.num_channels, self.config.patched_image_height, self.config.patch_size, self.config.patched_image_width, self.config.patch_size)
 
@@ -222,7 +264,6 @@ class Decoder(nn.Module):
         x: [Batch_Size, Num_Patches, Patch_Size ** 2 * Channels]
         output: [Batch_Size, Channels, Height, Width]
         """
-
         # reshape the tensor
         x = x.reshape(-1, self.config.patched_image_height, self.config.patched_image_width, self.config.patch_size, self.config.patch_size, self.config.num_channels)
 
@@ -249,44 +290,6 @@ class Decoder(nn.Module):
         # calculate the loss
         target = self.patchify(target)
 
-        
-        # normalization for only target
-        # do normalization if needed
-        # if self.config.do_norm_pix_loss:                                          
-        #     mean = target.mean(dim=-1, keepdim=True)
-        #     var = target.var(dim=-1, keepdim=True)
-        #     target = (target - mean) / (var + 1e-6) ** 0.5
-
-        # normalized for both target and prediction
-        # mean_pred = masked_prediction.mean(dim=-1, keepdim=True)
-        # std_pred = masked_prediction.std(dim=-1, keepdim=True) + 1e-8  # small epsilon to avoid division by zero
-        # normalized_prediction = (masked_prediction - mean_pred) / std_pred
-        # mean_target = masked_target.mean(dim=-1, keepdim=True)
-        # std_target = masked_target.std(dim=-1, keepdim=True) + 1e-8
-        # normalized_target = (masked_target - mean_target) / std_target
-        # # Calculate mean squared error on the normalized masked patches
-        # loss = F.mse_loss(normalized_prediction, normalized_target, reduction='mean')
-
-        # normalization for both target and prediction using built-in function
-        # Normalize using layer normalization
-        # normalized_prediction = F.layer_norm(masked_prediction, masked_prediction.shape[-1:])
-        # normalized_target = F.layer_norm(masked_target, masked_target.shape[-1:])
-
-
-        # manual loss calculation
-        # loss = (prediction - target) ** 2
-        # loss = loss.mean(dim=-1)  # mean over all channels
-        # loss = (loss * mask).sum() / mask.sum()  # mean only over non-ignored pixels
-
-        # hybrid approach
-        # Step 1: Calculate the element-wise MSE loss without reduction
-        # loss = F.mse_loss(prediction, target, reduction='none')  # Shape: [Batch_Size, Num_Patches, Patch_Size ** 2 * Channels]
-        # # Step 2: Take the mean across the channel dimension to match mask shape
-        # loss = loss.mean(dim=-1)  # Shape: [Batch_Size, Num_Patches]
-        # # Step 3: Apply the mask and compute the mean loss over the masked tokens
-        # masked_loss = (loss * mask).sum() / mask.sum()
-
-        # direct approach
         # Expand mask to match the shape of the patches
         mask_expanded = mask.unsqueeze(-1).expand_as(prediction)
 
@@ -309,34 +312,44 @@ class Decoder(nn.Module):
         Returns:
             torch.Tensor: decoded sequence.
         """
-
         # Reconstruct the original sequence
-        x, mask, ids_restore = self.reconstruct_sequence(x)
+        x, mask, _ = self.reconstruct_sequence(x)
 
-        # pass the reconstructed sequence through the decoder
-        x = self.decoder(x)
-
-        # apply layer normalization
-        x = self.post_layernorm(x)
-
-        # pass the output through the predictor
-        x = self.predictor(x)
+        # pass the output through the subsequent layers
+        x = self.predictor(self.post_layernorm(self.decoder(x)))
 
         # calculate the loss
         if self.config.do_loss_calculation:
             loss = self.loss(target=target, prediction=x, mask=mask)
-            return self.unpatchify(x), loss
+            return self.unpatchify(x), loss 
         else:
-            return self.unpatchify(x)
+            return self.unpatchify(x), None
 
 
 class DecoderModel(nn.Module):
+    def __init__(self, config: DecoderConfig) -> None:
+        """
+        Initializes the DecoderModel class.
 
-    def __init__(self, config: DecoderConfig):
+        Args:
+            config (DecoderConfig): Configuration object containing model hyperparameters.
+        
+        The initializer sets up a vision model using the given configuration.
+        """
         super().__init__()
         self.config = config
         self.vision_model = Decoder(config)
 
     def forward(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor], target: torch.Tensor) -> Tuple:
+        """
+        Forward pass of the DecoderModel.
+
+        Args:
+            x (Tuple[torch.Tensor, torch.Tensor, torch.Tensor]): Tuple containing the encoded representation, the binary mask, and the indices to restore the original order.
+            target (torch.Tensor): Target tensor of shape [Batch_Size, Num_Patches, Embed_Dim].
+
+        Returns:
+            Tuple: Tuple containing the prediction tensor of shape [Batch_Size, Num_Patches, Embed_Dim] and the loss tensor.
+        """
         # [Batch_Size, Channels, Height, Width] -> [Batch_Size, Num_Patches, Embed_Dim]
         return self.vision_model(x, target) 
