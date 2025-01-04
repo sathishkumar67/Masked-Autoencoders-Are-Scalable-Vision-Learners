@@ -37,6 +37,46 @@ class DecoderConfig:
         self.patched_image_width = self.image_size // self.patch_size
 
 
+class RMSNorm(torch.nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-8) -> None:
+        """
+        Initializes the RMSNorm module.
+
+        Args:
+            dim: The dimension of the input tensor.
+            eps: The epsilon value used to avoid division by zero.
+        """
+        super().__init__()
+        self.eps = eps
+        self.weight, self.bias = nn.Parameter(torch.ones(dim)), nn.Parameter(torch.zeros(dim))
+
+    def _norm(self, x) -> torch.Tensor:
+        """
+        Computes the RMSNorm of a tensor.
+
+        Given an input tensor `x`, compute its RMSNorm by dividing it by the root
+        mean square of its elements.
+
+        Args:
+            x: The input tensor.
+
+        Returns:
+            The RMSNorm of the input tensor.
+        """
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x) -> torch.Tensor:        
+        """
+        Computes the RMSNorm of a tensor and applies a learnable scale factor.
+
+        Args:
+            x: The input tensor.
+
+        Returns:
+            The RMSNorm of the input tensor multiplied by a learnable scale factor.
+        """
+        return self._norm(x.float()).type_as(x) * self.weight + self.bias
+
 class DecoderAttention(nn.Module):
     def __init__(self, config) -> None:
         """
@@ -126,9 +166,9 @@ class DecoderLayer(nn.Module):
         self.config = config
 
         self.self_attn = DecoderAttention(config)
-        self.layer_norm1 = nn.LayerNorm(self.config.hidden_size, eps=config.layer_norm_eps)
+        self.layer_norm1 = RMSNorm(self.config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = DecoderMLP(config)
-        self.layer_norm2 = nn.LayerNorm(self.config.hidden_size, eps=config.layer_norm_eps)
+        self.layer_norm2 = RMSNorm(self.config.hidden_size, eps=config.layer_norm_eps)
 
     # Ignore copy
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -194,7 +234,7 @@ class Decoder(nn.Module):
         # else, use the identity layer
         if self.config.in_proj_dim != self.config.hidden_size:
             self.projector = nn.Linear(self.config.in_proj_dim, self.config.hidden_size, bias=True)
-            self.projector_norm = nn.LayerNorm(self.config.hidden_size, eps=config.layer_norm_eps)
+            self.projector_norm = RMSNorm(self.config.hidden_size, eps=config.layer_norm_eps)
         else:
             self.projector = nn.Identity()
             self.projector_norm = nn.Identity()
@@ -208,7 +248,7 @@ class Decoder(nn.Module):
         )
 
         self.decoder = DecoderBlock(config)
-        self.post_layernorm = nn.LayerNorm(self.config.hidden_size, eps=config.layer_norm_eps)
+        self.post_layernorm = RMSNorm(self.config.hidden_size, eps=config.layer_norm_eps)
 
         # linear layer to project the output to the number of channels
         self.predictor = nn.Linear(self.config.hidden_size, self.config.patch_size ** 2 * self.config.num_channels, bias=True)
