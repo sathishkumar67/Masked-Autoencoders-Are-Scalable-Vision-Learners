@@ -1,2 +1,2 @@
-# testing out rms normalization
 # add [CLS] and register tokens
+# finding the perfect no of register tokens(depends on the task)
