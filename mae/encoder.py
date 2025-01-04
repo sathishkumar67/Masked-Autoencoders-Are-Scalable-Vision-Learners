@@ -39,6 +39,46 @@ class EncoderConfig:
         self.patched_image_width = self.image_size // self.patch_size
 
 
+class RMSNorm(torch.nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-8) -> None:
+        """
+        Initializes the RMSNorm module.
+
+        Args:
+            dim: The dimension of the input tensor.
+            eps: The epsilon value used to avoid division by zero.
+        """
+        super().__init__()
+        self.eps = eps
+        self.weight, self.bias = nn.Parameter(torch.ones(dim)), nn.Parameter(torch.zeros(dim))
+
+    def _norm(self, x) -> torch.Tensor:
+        """
+        Computes the RMSNorm of a tensor.
+
+        Given an input tensor `x`, compute its RMSNorm by dividing it by the root
+        mean square of its elements.
+
+        Args:
+            x: The input tensor.
+
+        Returns:
+            The RMSNorm of the input tensor.
+        """
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x) -> torch.Tensor:        
+        """
+        Computes the RMSNorm of a tensor and applies a learnable scale factor.
+
+        Args:
+            x: The input tensor.
+
+        Returns:
+            The RMSNorm of the input tensor multiplied by a learnable scale factor.
+        """
+        return self._norm(x.float()).type_as(x) * self.weight + self.bias
+
 class EncoderEmbeddings(nn.Module):
     def __init__(self, config: EncoderConfig):
         """
@@ -175,9 +215,9 @@ class EncoderLayer(nn.Module):
         super().__init__()
         self.config = config
         self.self_attn = EncoderAttention(config)
-        self.layer_norm1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.layer_norm1 = RMSNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = EncoderMLP(config)
-        self.layer_norm2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.layer_norm2 = RMSNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -245,7 +285,7 @@ class Encoder(nn.Module):
 
         self.embeddings = EncoderEmbeddings(config)
         self.encoder = EncoderBlock(config)
-        self.post_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.post_layernorm = RMSNorm(config.hidden_size, eps=config.layer_norm_eps)
     
     def random_masking(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
