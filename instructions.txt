@@ -1,2 +1,4 @@
 # add [CLS] and register tokens
 # finding the perfect no of register tokens(depends on the task)
+# replace learnable position_embedding with rotary position_embedding
+# need to understand the workflow of decoder(how it performs unshuffle and concat)
