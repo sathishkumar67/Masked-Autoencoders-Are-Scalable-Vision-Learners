@@ -4,8 +4,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Tuple
+import gin
 
-
+@gin.configurable
 @dataclass
 class DecoderConfig:
     image_size: int
@@ -16,13 +17,16 @@ class DecoderConfig:
     num_attention_heads: int
     num_channels: int
     patch_size: int
-    layer_norm_eps: float = 1e-8
+    norm_eps: float = 1e-8
     attention_dropout: float = 0.0
+    do_loss_calculation: bool = True
+    use_small_mlp: bool = True
     num_image_tokens: int = None
     head_dim: int = None
-    do_loss_calculation: bool = True
     patched_image_height: int = None
     patched_image_width: int = None
+    rng_seed: int = 42
+    rng_generator: torch.Generator = None
 
     def __post_init__(self):
         assert self.image_size % self.patch_size == 0, "Image size must be divisible by patch size"
@@ -36,6 +40,8 @@ class DecoderConfig:
         self.patched_image_height = self.image_size // self.patch_size
         self.patched_image_width = self.image_size // self.patch_size
 
+        if self.rng_generator is None:
+            self.rng_generator = torch.Generator().manual_seed(self.rng_seed)
 
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-8) -> None:
@@ -78,7 +84,7 @@ class RMSNorm(torch.nn.Module):
         return self._norm(x.float()).type_as(x) * self.weight + self.bias
 
 class DecoderAttention(nn.Module):
-    def __init__(self, config) -> None:
+    def __init__(self, config: DecoderConfig) -> None:
         """
         Initializes the DecoderAttention class.
 
@@ -121,8 +127,8 @@ class DecoderAttention(nn.Module):
         return self.out_proj(F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=self.config.attention_dropout).transpose(1, 2).contiguous().view(B, T, C))
 
 
-class DecoderMLP(nn.Module): # This is lightweight MLP if needed use gpt2_turbo MLP
-    def __init__(self, config) -> None:
+class DecoderMLPLight(nn.Module): # This is lightweight MLP if needed use gpt2_turbo MLP
+    def __init__(self, config: DecoderConfig) -> None:
         """
         __init__ method of the DecoderMLP class.
 
@@ -134,8 +140,8 @@ class DecoderMLP(nn.Module): # This is lightweight MLP if needed use gpt2_turbo 
         super().__init__()
         self.config = config
 
-        self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size)
-        self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size, bias=True)
+        self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size, bias=True)
         self.fc2.SCALE_INIT = 1
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -152,23 +158,59 @@ class DecoderMLP(nn.Module): # This is lightweight MLP if needed use gpt2_turbo 
         return self.fc2(F.gelu(self.fc1(hidden_states), approximate="tanh"))
 
 
-class DecoderLayer(nn.Module):
+class DecoderMLPLarge(nn.Module):
     def __init__(self, config: DecoderConfig) -> None:
         """
-        Initializes the DecoderLayer class with self-attention, layer normalization, and MLP components.
+        __init__ method of the DecoderMLPLarge class.
 
         Args:
             config (DecoderConfig): Configuration object containing model hyperparameters.
 
-        The initializer sets up a self-attention module, two layer normalization modules, and an MLP module.
+        Initializes the DecoderMLPLarge class with three linear layers. The first layer projects the input to the intermediate size, the second layer projects the intermediate size to the hidden size, and the third layer projects the hidden size to the intermediate size.
+        """
+        super().__init__()
+        self.config = config
+        
+        # projections
+        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=True)
+        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=True)
+        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=True)
+        self.down_proj.SCALE_INIT = 1
+    
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the DecoderMLPLarge module.
+
+        Args:
+            hidden_states (torch.Tensor): Input tensor of shape [Batch_Size, Num_Patches, Embed_Dim].
+
+        Returns:
+            torch.Tensor: Final output after the three linear layers with SiLU activation.
+        """
+        # hidden_states: [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Intermediate_Size]
+        return self.down_proj(F.silu(self.gate_proj(hidden_states)) * self.up_proj(hidden_states))
+
+
+class DecoderLayer(nn.Module):
+    def __init__(self, config: DecoderConfig) -> None:
+        """
+        Initializes the DecoderLayer class with self-attention, normmalization, and MLP components.
+
+        Args:
+            config (DecoderConfig): Configuration object containing model hyperparameters.
+
+        The initializer sets up a self-attention module, two normmalization modules, and an MLP module.
         """
         super().__init__()
         self.config = config
 
         self.self_attn = DecoderAttention(config)
-        self.layer_norm1 = RMSNorm(self.config.hidden_size, eps=config.layer_norm_eps)
-        self.mlp = DecoderMLP(config)
-        self.layer_norm2 = RMSNorm(self.config.hidden_size, eps=config.layer_norm_eps)
+        self.norm_1 = RMSNorm(self.config.hidden_size, eps=config.norm_eps)
+        if config.use_small_mlp:
+            self.mlp = DecoderMLPLight(config)
+        else:
+            self.mlp = DecoderMLPLarge(config)
+        self.norm_2 = RMSNorm(self.config.hidden_size, eps=config.norm_eps)
 
     # Ignore copy
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -182,9 +224,9 @@ class DecoderLayer(nn.Module):
             torch.Tensor: Final output after self-attention and mlp block.
         """
         # x: [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        x = x + self.self_attn(self.layer_norm1(x))
+        x = x + self.self_attn(self.norm_1(x))
         # x: [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        x = x + self.mlp(self.layer_norm2(x))
+        x = x + self.mlp(self.norm_2(x))
         # x: [Batch_Size, Num_Patches, Embed_Dim]
         return x
 
@@ -197,7 +239,7 @@ class DecoderBlock(nn.Module):
         Args:
             config (DecoderConfig): Configuration object containing model hyperparameters.
 
-        The initializer sets up a list of DecoderLayer objects, each of which contains a self-attention module, two layer normalization modules, and an MLP module.
+        The initializer sets up a list of DecoderLayer objects, each of which contains a self-attention module, two normmalization modules, and an MLP module.
         """
         super().__init__()
         self.config = config
@@ -225,7 +267,15 @@ class DecoderBlock(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: DecoderConfig) -> None:
+        """
+        Initializes the Decoder class with a projection layer, mask token, position embedding, decoder block, post normalization, and prediction layer.
+
+        Args:
+            config (DecoderConfig): Configuration object containing model hyperparameters.
+
+        The initializer sets up a projection layer, mask token, position embedding, decoder block, post normalization, and prediction layer.
+        """
         super().__init__()
         self.config = config
 
@@ -234,7 +284,7 @@ class Decoder(nn.Module):
         # else, use the identity layer
         if self.config.in_proj_dim != self.config.hidden_size:
             self.projector = nn.Linear(self.config.in_proj_dim, self.config.hidden_size, bias=True)
-            self.projector_norm = RMSNorm(self.config.hidden_size, eps=config.layer_norm_eps)
+            self.projector_norm = RMSNorm(self.config.hidden_size, eps=config.norm_eps)
         else:
             self.projector = nn.Identity()
             self.projector_norm = nn.Identity()
@@ -248,7 +298,7 @@ class Decoder(nn.Module):
         )
 
         self.decoder = DecoderBlock(config)
-        self.post_layernorm = RMSNorm(self.config.hidden_size, eps=config.layer_norm_eps)
+        self.post_norm = RMSNorm(self.config.hidden_size, eps=config.norm_eps)
 
         # linear layer to project the output to the number of channels
         self.predictor = nn.Linear(self.config.hidden_size, self.config.patch_size ** 2 * self.config.num_channels, bias=True)
@@ -359,7 +409,7 @@ class Decoder(nn.Module):
         x, mask, _ = self.reconstruct_sequence(x)
 
         # pass the output through the subsequent layers
-        x = self.predictor(self.post_layernorm(self.decoder(x)))
+        x = self.predictor(self.post_norm(self.decoder(x)))
 
         # calculate the loss
         if self.config.do_loss_calculation:
@@ -383,6 +433,26 @@ class DecoderModel(nn.Module):
         self.config = config
         self.vision_model = Decoder(config)
 
+        # Initialize weights 
+        self.apply(self.__init__weights)
+        
+    def __init__weights(self, module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, "SCALE_INIT"):
+                std *= (2 * self.config.num_hidden_layers) ** -0.5
+            nn.init.normal_(module.weight, mean=0.0, std=std, generator=self.config.rng_generator.manual_seed(self.config.rng_seed))
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02, generator=self.config.rng_generator.manual_seed(self.config.rng_seed))
+        elif isinstance(module, RMSNorm):
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Conv2d):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02, generator=self.config.rng_generator.manual_seed(self.config.rng_seed))
+            nn.init.zeros_(module.bias)
+            
     def forward(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor], target: torch.Tensor) -> Tuple:
         """
         Forward pass of the DecoderModel.

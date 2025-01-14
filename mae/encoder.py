@@ -3,9 +3,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, Optional
+import gin
 
-
+@gin.configurable
 @dataclass
 class EncoderConfig:
     image_size: int
@@ -15,14 +16,17 @@ class EncoderConfig:
     num_attention_heads: int
     num_channels: int
     patch_size: int
-    layer_norm_eps: float = 1e-8
+    norm_eps: float = 1e-8
     attention_dropout: float = 0.0
     do_random_mask: bool = True
     mask_ratio: float = 0.75
+    use_small_mlp: bool = True
     head_dim: int = None
     patched_image_height: int = None
     patched_image_width: int = None
-    num_image_tokens: int = None
+    num_image_tokens: int = 0
+    rng_seed: int = 42
+    rng_generator: Optional[torch.Generator] = None
 
     def __post_init__(self):
         # Check if the values are valid
@@ -37,6 +41,9 @@ class EncoderConfig:
         self.head_dim = self.hidden_size // self.num_attention_heads
         self.patched_image_height = self.image_size // self.patch_size
         self.patched_image_width = self.image_size // self.patch_size
+        
+        if self.rng_generator is None:
+            self.rng_generator = torch.Generator().manual_seed(self.rng_seed)
 
 
 class RMSNorm(torch.nn.Module):
@@ -80,7 +87,7 @@ class RMSNorm(torch.nn.Module):
         return self._norm(x.float()).type_as(x) * self.weight + self.bias
 
 class EncoderEmbeddings(nn.Module):
-    def __init__(self, config: EncoderConfig):
+    def __init__(self, config: EncoderConfig) -> None:
         """
         __init__ method of the EncoderEmbeddings class.
 
@@ -127,7 +134,7 @@ class EncoderEmbeddings(nn.Module):
 
 
 class EncoderAttention(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: EncoderConfig) -> None:
         """
         __init__ method of the EncoderAttention class.
 
@@ -171,8 +178,8 @@ class EncoderAttention(nn.Module):
 
 
 
-class EncoderMLP(nn.Module): # This is lightweight MLP if needed use gpt2_turbo MLP
-    def __init__(self, config):
+class EncoderMLPLight(nn.Module): # This is lightweight MLP if needed use gpt2_turbo MLP
+    def __init__(self, config: EncoderConfig) -> None:
         """
         __init__ method of the EncoderMLP class.
 
@@ -183,8 +190,8 @@ class EncoderMLP(nn.Module): # This is lightweight MLP if needed use gpt2_turbo 
         """
         super().__init__()
         self.config = config
-        self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size)
-        self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size, bias=True)
+        self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size, bias=True)
         self.fc2.SCALE_INIT = 1
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:        
@@ -201,6 +208,21 @@ class EncoderMLP(nn.Module): # This is lightweight MLP if needed use gpt2_turbo 
         return self.fc2(F.gelu(self.fc1(hidden_states), approximate="tanh"))
 
 
+class EncoderMLPLarge(nn.Module):
+    def __init__(self, config: EncoderConfig) -> None:
+        super().__init__()
+        self.config = config
+        
+        # projections
+        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=True)
+        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=True)
+        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=True)
+        self.down_proj.SCALE_INIT = 1
+    
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # hidden_states: [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Intermediate_Size]
+        return self.down_proj(F.silu(self.gate_proj(hidden_states)) * self.up_proj(hidden_states))
+
 
 class EncoderLayer(nn.Module):
     def __init__(self, config: EncoderConfig) -> None:
@@ -210,14 +232,17 @@ class EncoderLayer(nn.Module):
         Args:
             config (EncoderConfig): Configuration object containing model hyperparameters.
 
-        Initializes the EncoderLayer with self-attention, layer normalization, and MLP components.
+        Initializes the EncoderLayer with self-attention, normalization, and MLP components.
         """
         super().__init__()
         self.config = config
         self.self_attn = EncoderAttention(config)
-        self.layer_norm1 = RMSNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.mlp = EncoderMLP(config)
-        self.layer_norm2 = RMSNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.norm_1 = RMSNorm(config.hidden_size, eps=config.norm_eps)
+        if config.use_small_mlp:
+            self.mlp = EncoderMLPLight(config)
+        else:
+            self.mlp = EncoderMLPLarge(config)
+        self.norm_2 = RMSNorm(config.hidden_size, eps=config.norm_eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -230,9 +255,9 @@ class EncoderLayer(nn.Module):
             torch.Tensor: Final output after self-attention and mlp block.
         """
         # x: [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        x = x + self.self_attn(self.layer_norm1(x))
+        x = x + self.self_attn(self.norm_1(x))
         # x: [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        x = x + self.mlp(self.layer_norm2(x))
+        x = x + self.mlp(self.norm_2(x))
         # x: [Batch_Size, Num_Patches, Embed_Dim]
         return x
 
@@ -271,21 +296,21 @@ class EncoderBlock(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, config) -> None:
+    def __init__(self, config: EncoderConfig) -> None:
         """
         __init__ method of the Encoder class.
 
         Args:
             config (EncoderConfig): Configuration for the Encoder.
 
-        Initializes the Encoder class with the given configuration. The Encoder consists of an embedding layer, a block of encoder layers, and a layer normalization layer.
+        Initializes the Encoder class with the given configuration. The Encoder consists of an embedding layer, a block of encoder layers, and a normalization layer.
         """
         super().__init__()
         self.config = config
 
         self.embeddings = EncoderEmbeddings(config)
         self.encoder = EncoderBlock(config)
-        self.post_layernorm = RMSNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.post_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
     
     def random_masking(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -326,7 +351,7 @@ class Encoder(nn.Module):
             pixel_values (torch.Tensor): Input image tensor of shape [Batch_Size, Channels, Height, Width].
 
         Returns:
-            torch.Tensor: Final output after encoding and layer normalization.
+            torch.Tensor: Final output after encoding and normalization.
         """
         # pixel_values: [Batch_Size, Channels, Height, Width] -> [Batch_Size, Num_Patches, Embed_Dim]
         hidden_states = self.embeddings(pixel_values)
@@ -339,7 +364,7 @@ class Encoder(nn.Module):
             mask, ids_restore = None, None
 
         # Return the output and the binary mask, and the indices to restore the original order
-        return self.post_layernorm(self.encoder(masked_hidden_states)), mask, ids_restore
+        return self.post_norm(self.encoder(masked_hidden_states)), mask, ids_restore
 
 
 class EncoderModel(nn.Module):
@@ -359,6 +384,27 @@ class EncoderModel(nn.Module):
         self.config = config
         self.vision_model = Encoder(config)
 
+        # Initialize weights 
+        self.apply(self.__init__weights)
+
+        
+    def __init__weights(self, module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, "SCALE_INIT"):
+                std *= (2 * self.config.num_hidden_layers) ** -0.5
+            nn.init.normal_(module.weight, mean=0.0, std=std, generator=self.config.rng_generator.manual_seed(self.config.rng_seed))
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02, generator=self.config.rng_generator.manual_seed(self.config.rng_seed))
+        elif isinstance(module, RMSNorm):
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Conv2d):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02, generator=self.config.rng_generator.manual_seed(self.config.rng_seed))
+            nn.init.zeros_(module.bias)
+    
     def forward(self, pixel_values: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, None, None]:
         """
         Forward pass of the vision transformer model.
