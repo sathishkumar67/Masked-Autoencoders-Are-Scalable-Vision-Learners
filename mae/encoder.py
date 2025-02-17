@@ -46,46 +46,6 @@ class EncoderConfig:
             self.rng_generator = torch.Generator().manual_seed(self.rng_seed)
 
 
-class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-8) -> None:
-        """
-        Initializes the RMSNorm module.
-
-        Args:
-            dim: The dimension of the input tensor.
-            eps: The epsilon value used to avoid division by zero.
-        """
-        super().__init__()
-        self.eps = eps
-        self.weight, self.bias = nn.Parameter(torch.ones(dim)), nn.Parameter(torch.zeros(dim))
-
-    def _norm(self, x) -> torch.Tensor:
-        """
-        Computes the RMSNorm of a tensor.
-
-        Given an input tensor `x`, compute its RMSNorm by dividing it by the root
-        mean square of its elements.
-
-        Args:
-            x: The input tensor.
-
-        Returns:
-            The RMSNorm of the input tensor.
-        """
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, x) -> torch.Tensor:        
-        """
-        Computes the RMSNorm of a tensor and applies a learnable scale factor.
-
-        Args:
-            x: The input tensor.
-
-        Returns:
-            The RMSNorm of the input tensor multiplied by a learnable scale factor.
-        """
-        return self._norm(x.float()).type_as(x) * self.weight + self.bias
-
 class EncoderEmbeddings(nn.Module):
     def __init__(self, config: EncoderConfig) -> None:
         """
@@ -237,12 +197,12 @@ class EncoderLayer(nn.Module):
         super().__init__()
         self.config = config
         self.self_attn = EncoderAttention(config)
-        self.norm_1 = RMSNorm(config.hidden_size, eps=config.norm_eps)
+        self.norm_1 = nn.LayerNorm(config.hidden_size, eps=config.norm_eps)
         if config.use_small_mlp:
             self.mlp = EncoderMLPLight(config)
         else:
             self.mlp = EncoderMLPLarge(config)
-        self.norm_2 = RMSNorm(config.hidden_size, eps=config.norm_eps)
+        self.norm_2 = nn.LayerNorm(config.hidden_size, eps=config.norm_eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -310,7 +270,7 @@ class Encoder(nn.Module):
 
         self.embeddings = EncoderEmbeddings(config)
         self.encoder = EncoderBlock(config)
-        self.post_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
+        self.post_norm = nn.LayerNorm(config.hidden_size, eps=config.norm_eps)
     
     def random_masking(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -324,11 +284,12 @@ class Encoder(nn.Module):
             mask (torch.Tensor): Binary mask showing which tokens were masked (1) or kept (0).
             ids_restore (torch.Tensor): Indices to restore the original order of tokens.
         """
+        device = x.device
         N, L, D = x.shape  # batch, length, dimension
         len_keep = int(L * (1 - self.config.mask_ratio))  # Number of tokens to keep
 
         # Generate random noise and shuffle tokens
-        ids_shuffle = torch.argsort(torch.rand(N, L), dim=1)  # Shuffle by sorting noise
+        ids_shuffle = torch.argsort(torch.rand(N, L, device=device), dim=1)  # Shuffle by sorting noise
         ids_restore = torch.argsort(ids_shuffle, dim=1)  # Indices to restore original order
 
         # Keep only a subset of tokens
@@ -336,7 +297,7 @@ class Encoder(nn.Module):
         x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).expand(-1, -1, D))  # Gather kept tokens
 
         # Create binary mask (0 for kept, 1 for removed)
-        mask = torch.ones([N, L])  # Start with all 1s (all removed)
+        mask = torch.ones([N, L], device=device)  # Start with all 1s (all removed)
         mask[:, :len_keep] = 0  # Mark kept tokens as 0
         mask = torch.gather(mask, dim=1, index=ids_restore)  # Restore original order of the mask
 
@@ -398,7 +359,7 @@ class EncoderModel(nn.Module):
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02, generator=self.config.rng_generator.manual_seed(self.config.rng_seed))
-        elif isinstance(module, RMSNorm):
+        elif isinstance(module, nn.LayerNorm):
             nn.init.ones_(module.weight)
             nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Conv2d):
