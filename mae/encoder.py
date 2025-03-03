@@ -204,7 +204,7 @@ class EncoderLayer(nn.Module):
             self.mlp = EncoderMLPLarge(config)
         self.norm_2 = nn.LayerNorm(config.hidden_size, eps=config.norm_eps)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of the EncoderLayer module.
 
@@ -214,12 +214,14 @@ class EncoderLayer(nn.Module):
         Returns:
             torch.Tensor: Final output after self-attention and mlp block.
         """
+        # hidden_states.add_(self.self_attn(self.norm_1(hidden_states))) # need to check this out
+        # hidden_states.add_(self.mlp(self.norm_2(hidden_states)))
         # x: [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        x = x + self.self_attn(self.norm_1(x))
+        hidden_states = hidden_states + self.self_attn(self.norm_1(hidden_states))
         # x: [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        x = x + self.mlp(self.norm_2(x))
+        hidden_states = hidden_states + self.mlp(self.norm_2(hidden_states))
         # x: [Batch_Size, Num_Patches, Embed_Dim]
-        return x
+        return hidden_states
 
 
 class EncoderBlock(nn.Module):
