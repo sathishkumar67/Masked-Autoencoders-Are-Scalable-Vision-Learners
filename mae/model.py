@@ -19,10 +19,7 @@ class MAEConfig:
     gpu_count: int
     num_workers: int
     pin_memory: bool
-    
-    def __post_init__(self):
-        pass
-    
+
 class MAE(nn.Module):
     def __init__(self, encoder: nn.Module, decoder: nn.Module) -> None:
         super().__init__()
