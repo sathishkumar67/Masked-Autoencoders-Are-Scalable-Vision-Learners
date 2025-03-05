@@ -13,10 +13,8 @@ from torch.optim.lr_scheduler import SequentialLR, LambdaLR, CosineAnnealingLR
 from concurrent.futures import ThreadPoolExecutor
 from itertools import chain
 from huggingface_hub import hf_hub_download
-from model import MAEConfig, MAE
+from mae import *
 from dataset import ImageDataset
-from mae.encoder import EncoderModel, EncoderConfig
-from mae.decoder import DecoderModel, DecoderConfig
 
 
 # split paths 
@@ -70,14 +68,7 @@ def trainer(rank, world_size):
     master_process = (rank == 0)
     torch.set_float32_matmul_precision('medium')  # Set the matmul precision to medium
     
-    # Load the encoder and decoder configs
-    gin.parse_config_file(f"{LOCAL_DIR}/config/encoder_config1.gin")
-    encoder_config = EncoderConfig()
-    gin.parse_config_file("{LOCAL_DIR}/config/decoder_config1.gin")
-    decoder_config = DecoderConfig()
 
-    # load the encoder, decoder model
-    encoder, decoder = EncoderModel(encoder_config), DecoderModel(decoder_config)
 
 
     # Initialize the Process Group
