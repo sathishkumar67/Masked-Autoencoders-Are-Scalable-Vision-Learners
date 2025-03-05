@@ -26,6 +26,7 @@ class EncoderConfig:
     patched_image_width: int = None
     num_image_tokens: int = 0
     rng_seed: int = 42
+    rng_device: str|torch.device = torch.device("cpu") 
     rng_generator: Optional[torch.Generator] = None
 
     def __post_init__(self):
@@ -43,7 +44,7 @@ class EncoderConfig:
         self.patched_image_width = self.image_size // self.patch_size
         
         if self.rng_generator is None:
-            self.rng_generator = torch.Generator().manual_seed(self.rng_seed)
+            self.rng_generator = torch.Generator(device=self.rng_device).manual_seed(self.rng_seed)
 
 
 class EncoderEmbeddings(nn.Module):

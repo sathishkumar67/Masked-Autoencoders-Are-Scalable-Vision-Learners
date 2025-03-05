@@ -26,6 +26,7 @@ class DecoderConfig:
     patched_image_height: int = None
     patched_image_width: int = None
     rng_seed: int = 42
+    rng_device: str|torch.device = torch.device("cpu")
     rng_generator: torch.Generator = None
 
     def __post_init__(self):
@@ -41,7 +42,7 @@ class DecoderConfig:
         self.patched_image_width = self.image_size // self.patch_size
 
         if self.rng_generator is None:
-            self.rng_generator = torch.Generator().manual_seed(self.rng_seed)
+            self.rng_generator = torch.Generator(device=self.rng_device).manual_seed(self.rng_seed)
 
 class DecoderAttention(nn.Module):
     def __init__(self, config: DecoderConfig) -> None:
